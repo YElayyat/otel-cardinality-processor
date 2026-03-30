@@ -1,0 +1,21 @@
+dist:
+  name: otelcol-cardinality-guardian
+  description: >-
+    Custom OpenTelemetry Collector binary for Cardinality Guardian end-to-end
+    tests. Includes only the three components required by the E2E suite: the
+    OTLP receiver (gRPC + HTTP), the file exporter (writes OTLP JSON to disk),
+    and the cardinality_guardian processor under test.
+  output_path: /tmp/otelcol-cardinality-guardian
+  otelcol_version: 0.148.0
+
+exporters:
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/fileexporter v0.148.0
+
+processors:
+  - gomod: github.com/YElayyat/otel-cardinality-processor v0.0.0
+    path: ../../
+    name: cardinalityprocessor
+    import: github.com/YElayyat/otel-cardinality-processor/cardinalityprocessor
+
+receivers:
+  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.148.0

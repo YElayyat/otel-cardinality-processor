@@ -1,0 +1,16 @@
+name: Security Report
+description: Report a security vulnerability
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### 🕵️ Security Reporting
+        **STOP! Please do NOT open a public issue for security vulnerabilities.**
+
+        To protect the community, we use [GitHub's Private Vulnerability Reporting](https://github.com/YElayyat/otel-cardinality-processor/security/advisories/new) feature.
+
+        1. Go to the [Security Tab](https://github.com/YElayyat/otel-cardinality-processor/security)
+        2. Click **Report a vulnerability**
+        3. Fill out the private disclosure form.
+
+        Thank you for practicing responsible disclosure!

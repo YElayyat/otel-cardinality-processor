@@ -1,0 +1,27 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4319
+      http:
+        endpoint: 0.0.0.0:4320
+
+processors:
+  cardinality_guardian:
+    max_cardinality_delta_per_epoch: 2
+    epoch_duration_seconds: 300
+    tag_only: true
+
+exporters:
+  file:
+    path: /tmp/cardinality-e2e-tagonly-output.json
+
+service:
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [cardinality_guardian]
+      exporters: [file]

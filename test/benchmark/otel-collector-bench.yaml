@@ -1,0 +1,26 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  cardinality_guardian:
+    max_cardinality_delta_per_epoch: 500
+    epoch_duration_seconds: 30
+
+exporters:
+  debug:
+    verbosity: basic
+
+extensions:
+  pprof:
+    endpoint: 0.0.0.0:1777
+
+service:
+  extensions: [pprof]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [cardinality_guardian]
+      exporters: [debug]

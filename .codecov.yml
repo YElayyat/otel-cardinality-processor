@@ -1,0 +1,12 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+
+ignore:
+  - "internal/cmd/**/*"
+  - "test/**/*"
+  - "examples/**/*"
+  - "scripts/**/*"

@@ -1,0 +1,32 @@
+dist:
+  name: otelcol-custom
+  description: Custom OTel Collector with Cardinality Guardian
+  output_path: ./build
+
+exporters:
+  - gomod: go.opentelemetry.io/collector/exporter/debugexporter v0.148.0
+  - gomod: go.opentelemetry.io/collector/exporter/otlpexporter v0.148.0
+
+processors:
+  - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.148.0
+  # Your Custom Processor
+  - gomod: github.com/YElayyat/otel-cardinality-processor v0.0.0
+    name: cardinalityprocessor
+    import: github.com/YElayyat/otel-cardinality-processor/cardinalityprocessor
+
+extensions:
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/pprofextension v0.148.0
+
+receivers:
+  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.148.0
+
+providers:
+  - gomod: go.opentelemetry.io/collector/confmap/provider/envprovider v1.48.0
+  - gomod: go.opentelemetry.io/collector/confmap/provider/fileprovider v1.48.0
+  - gomod: go.opentelemetry.io/collector/confmap/provider/httpprovider v1.48.0
+  - gomod: go.opentelemetry.io/collector/confmap/provider/httpsprovider v1.48.0
+  - gomod: go.opentelemetry.io/collector/confmap/provider/yamlprovider v1.48.0
+
+replaces:
+  # GPS coordinate to your source code
+  - github.com/YElayyat/otel-cardinality-processor => ../../

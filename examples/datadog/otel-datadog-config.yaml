@@ -1,0 +1,45 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  cardinality_guardian:
+    max_cardinality_delta_per_epoch: 500
+    epoch_duration_seconds: 300
+    estimated_cost_per_metric_month: 0.05
+    never_drop_labels:
+      - region
+      - service.name
+
+exporters:
+  # Export application telemetry to Datadog natively
+  datadog:
+    api:
+      key: ${env:DD_API_KEY}
+    metrics:
+      # OTel to Datadog metric translation
+      resource_attributes_as_tags: true
+
+service:
+  # Route the processor's internal cost-savings metrics to Datadog!
+  # This makes 'estimated_savings_dollars_total' queryable inside the DD SaaS.
+  telemetry:
+    metrics:
+      readers:
+        - periodic:
+            interval: 30s
+            exporter:
+              otlp:
+                # Loop the internal telemetry straight back into our own OTLP receiver
+                # so it traverses the pipeline and exits into the Datadog exporter.
+                endpoint: "localhost:4317"
+
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [cardinality_guardian]
+      exporters: [datadog]
