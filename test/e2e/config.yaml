@@ -1,0 +1,36 @@
+# Runtime configuration for the Cardinality Guardian E2E test collector.
+#
+# Pipeline: OTLP receiver -> cardinality_guardian -> file exporter
+#
+# The cardinality limit is set to 2 so that a test payload of 3 unique
+# session_id values produces exactly one stripped attribute (the 3rd).
+# The file exporter writes every processed batch as a newline-delimited
+# OTLP JSON line to /tmp/cardinality-e2e-output.json, which the test reads
+# and parses with pmetric.JSONUnmarshaler.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  cardinality_guardian:
+    max_cardinality_delta_per_epoch: 2
+    epoch_duration_seconds: 300
+
+exporters:
+  file:
+    path: /tmp/cardinality-e2e-output.json
+
+service:
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [cardinality_guardian]
+      exporters: [file]
