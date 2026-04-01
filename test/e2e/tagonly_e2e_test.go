@@ -88,13 +88,13 @@ func TestE2E_CardinalityTagOnlyMode(t *testing.T) {
 		if _, ok := dp.Attributes().Get("session_id"); ok {
 			withSessionID++
 		}
-		if val, ok := dp.Attributes().Get("cardinality_limit_exceeded"); ok && val.Bool() == true {
+		if val, ok := dp.Attributes().Get("otel.metric.overflow"); ok && val.Bool() == true {
 			withLimitFlag++
 		}
 	}
 
 	assert.Equal(t, 3, withSessionID, "all 3 data points should retain session_id in tag_only mode")
-	assert.Equal(t, 1, withLimitFlag, "exactly 1 data point should have the cardinality_limit_exceeded flag set to true")
+	assert.Equal(t, 1, withLimitFlag, "exactly 1 data point should have the otel.metric.overflow flag set to true")
 
 	t.Logf("SUCCESS: %d/3 data points retained session_id and %d was tagged.", withSessionID, withLimitFlag)
 }

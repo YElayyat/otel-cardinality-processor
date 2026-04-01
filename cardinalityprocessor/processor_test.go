@@ -540,7 +540,7 @@ func TestCardinalityProcessor_TagOnlyMode(t *testing.T) {
                 }
 
                 // 2. Count how many got the special routing tag
-                if _, hasTag := attrs.Get("cardinality_limit_exceeded"); hasTag {
+                if _, hasTag := attrs.Get("otel.metric.overflow"); hasTag {
                         taggedCount++
                 }
         }

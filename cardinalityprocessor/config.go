@@ -57,7 +57,7 @@ type Config struct {
 	// mode. When false (the default), high-cardinality attributes are silently
 	// removed from the data point, keeping expensive time-series databases clean.
 	// When true, the attribute is preserved and a boolean attribute
-	// "cardinality_limit_exceeded: true" is injected into the same data point.
+	// "otel.metric.overflow: true" is injected into the same data point.
 	//
 	// The injected tag is designed to be consumed by a downstream OTel routing
 	// processor: metrics with the tag can be forwarded to cheap object storage
