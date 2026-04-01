@@ -564,7 +564,7 @@ func (p *cardinalityProcessor) processSummaryDataPoints(metricName string, dps p
 // TagOnly dual-route logic:
 //
 // When Config.TagOnly is true the processor must not delete any attribute — it
-// must instead inject a "cardinality_limit_exceeded=true" boolean attribute.
+// must instead inject an "otel.metric.overflow=true" boolean attribute.
 // The injection cannot happen inside the RemoveIf callback because pdata's
 // KeyValueList backing slice may be reallocated by a PutBool call while
 // RemoveIf still holds its internal cursor, producing undefined behavior.
@@ -613,7 +613,7 @@ func (p *cardinalityProcessor) handleAttributes(metricName string, attrs pcommon
         // Apply the routing tag only after iteration is complete so that
         // pcommon.Map is never modified while RemoveIf holds its internal cursor.
         if shouldTag {
-                attrs.PutBool("cardinality_limit_exceeded", true)
+                attrs.PutBool("otel.metric.overflow", true)
         }
 }
 

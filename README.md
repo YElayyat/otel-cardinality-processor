@@ -86,11 +86,11 @@ After:   {region="us-east", status="200"}
 
 ### Tag-Only Mode
 
-When `tag_only: true`, no attribute is ever deleted. Instead, the processor injects a boolean attribute `cardinality_limit_exceeded: true` into any data point where at least one label breached the limit.
+When `tag_only: true`, no attribute is ever deleted. Instead, the processor injects a boolean attribute `otel.metric.overflow: true` into any data point where at least one label breached the limit.
 
 ```
 Before:  {region="us-east", status="200", session_id="a3f9c..."}  ← over limit
-After:   {region="us-east", status="200", session_id="a3f9c...", cardinality_limit_exceeded: true}
+After:   {region="us-east", status="200", session_id="a3f9c...", otel.metric.overflow: true}
 ```
 
 A downstream OTel routing processor can then match on this attribute and forward the tagged metric to cheap object storage (S3, GCS, etc.) while clean metrics continue flowing to the primary TSDB. This makes cardinality enforcement non-destructive and reversible, which is valuable during initial rollout or in regulated environments where data must not be dropped.
@@ -168,7 +168,7 @@ processors:
       - http.status_code
       - service.name
 
-    # Set to true to inject 'cardinality_limit_exceeded: true' instead of
+    # Set to true to inject 'otel.metric.overflow: true' instead of
     # stripping the attribute. Enables dual-route cold-storage patterns.
     # Set to false (default) for hard enforcement.
     tag_only: false
