@@ -52,9 +52,9 @@ Concurrency is handled by 256 independent shards, each with its own `sync.RWMute
 
 ### 4. Can I test this in production without risking data loss?
 
-Yes. Set `tag_only: true` in the processor configuration. In this mode, no attribute is ever removed. Instead, data points where at least one label exceeds the cardinality limit receive a boolean attribute `cardinality_limit_exceeded: true`. Your existing pipeline continues to export every label unchanged.
+Yes. Set `tag_only: true` in the processor configuration. In this mode, no attribute is ever removed. Instead, data points where at least one label exceeds the cardinality limit receive a boolean attribute `otel.metric.overflow: true`. Your existing pipeline continues to export every label unchanged.
 
-You can then add a downstream OTel routing processor that matches on `cardinality_limit_exceeded` and forks those metrics to a secondary destination — a cheap object store like S3 or GCS, a debug exporter, or a dev TSDB — while clean metrics flow to your production TSDB as before. This makes the enforcement decision fully visible and completely reversible.
+You can then add a downstream OTel routing processor that matches on `otel.metric.overflow` and forks those metrics to a secondary destination — a cheap object store like S3 or GCS, a debug exporter, or a dev TSDB — while clean metrics flow to your production TSDB as before. This makes the enforcement decision fully visible and completely reversible.
 
 A recommended rollout sequence:
 
