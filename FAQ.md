@@ -13,14 +13,19 @@ Beyond the safelist, the processor only strips labels whose unique-value growth 
 **Does the limit apply to the whole metric, or individual labels?**
 The processor is an **Attribute-level Cardinality Limiter**, not an overarching series limiter. It creates a totally separate HyperLogLog sketch for every single `(metric_name, label_key)` pair it sees. 
 
-For example, if you have a metric `latency` with labels `api` (20 values), `region` (10 values), and `userId` (2 values):
-* The tracker for `(latency, api)` sees **20** unique values.
-* The tracker for `(latency, region)` sees **10** unique values.
-* The tracker for `(latency, userId)` sees **2** unique values.
+For example, if you have a metric `http_requests` with labels `api` (20 values), `region` (10 values), and `error.type` (5 values like `"timeout"`, `"not_found"`, etc.):
+* The tracker for `(http_requests, api)` sees **20** unique values.
+* The tracker for `(http_requests, region)` sees **10** unique values.
+* The tracker for `(http_requests, error.type)` sees **5** unique values.
 
-Even though the combinatoric total behind the scenes is 400 unique time series (20 * 10 * 2), none of the individual dimensions exceed a hypothetical `500` limit, so everything passes cleanly. 
+None of the individual dimensions exceed a hypothetical `500` limit, so everything passes cleanly.
 
-If a rogue deployment causes `userId` to suddenly spike to **50,000** unique IDs, only the `(latency, userId)` tracker breaches the limit. The processor will surgically strip the `userId` label off the payload, flattening the explosion down to exactly 200 safe series, while leaving your `api` and `region` dimensions perfectly intact so your core dashboard graphs don't break.
+Now imagine a rogue deployment introduces a bug that accidentally logs raw database exceptions into the `error.type` attribute instead of the standard error code:
+
+* **Expected:** `error.type = "db_timeout"`
+* **The Bug:** `error.type = "Lock wait timeout exceeded; txn_id=8f7d6a5b..."`
+
+Because every transaction ID is unique, `error.type` suddenly spikes to **50,000** unique values. Only the `(http_requests, error.type)` tracker breaches the limit. The processor surgically strips just the `error.type` label, flattening the cardinality explosion instantly, while leaving your `api` and `region` dimensions perfectly intact so your core traffic dashboards don't break.
 
 If you are still uncomfortable, use `tag_only: true` mode first (see Question 4). In that mode nothing is ever deleted — the processor only tags data points, giving you full visibility before you flip to hard enforcement.
 
