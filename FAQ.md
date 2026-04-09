@@ -13,19 +13,14 @@ Beyond the safelist, the processor only strips labels whose unique-value growth 
 **Does the limit apply to the whole metric, or individual labels?**
 The processor is an **Attribute-level Cardinality Limiter**, not an overarching series limiter. It creates a totally separate HyperLogLog sketch for every single `(metric_name, label_key)` pair it sees. 
 
-For example, if you have a metric `http_requests` with labels `api` (20 values), `region` (10 values), and `error.type` (5 values like `"timeout"`, `"not_found"`, etc.):
+For example, if you have a metric `http_requests` with labels `api` (20 values), `region` (10 values), and `user_agent` (50 values):
 * The tracker for `(http_requests, api)` sees **20** unique values.
 * The tracker for `(http_requests, region)` sees **10** unique values.
-* The tracker for `(http_requests, error.type)` sees **5** unique values.
+* The tracker for `(http_requests, user_agent)` sees **50** unique values.
 
 None of the individual dimensions exceed a hypothetical `500` limit, so everything passes cleanly.
 
-Now imagine a rogue deployment introduces a bug that accidentally logs raw database exceptions into the `error.type` attribute instead of the standard error code:
-
-* **Expected:** `error.type = "db_timeout"`
-* **The Bug:** `error.type = "Lock wait timeout exceeded; txn_id=8f7d6a5b..."`
-
-Because every transaction ID is unique, `error.type` suddenly spikes to **50,000** unique values. Only the `(http_requests, error.type)` tracker breaches the limit. The processor surgically strips just the `error.type` label, flattening the cardinality explosion instantly, while leaving your `api` and `region` dimensions perfectly intact so your core traffic dashboards don't break.
+If `user_agent` suddenly spikes to **50,000** unique values (e.g., bots injecting random strings), only the `(http_requests, user_agent)` tracker breaches the limit. The processor surgically strips just the `user_agent` label, while leaving `api` and `region` perfectly intact so your core traffic dashboards don't break. See the [README](README.md#the-problem) for a detailed real-world scenario.
 
 If you are still uncomfortable, use `tag_only: true` mode first (see Question 4). In that mode nothing is ever deleted — the processor only tags data points, giving you full visibility before you flip to hard enforcement.
 
@@ -153,3 +148,39 @@ Cardinality management requires defense-in-depth. Here is how Cardinality Guardi
   If high-cardinality data reaches your TSDB, the results are destructive. Prometheus enforces limits (like `series_limit`) by dropping the series or failing the entire scrape, creating massive monitoring blind spots. Commercial TSDBs like Datadog will either accept the data (resulting in a massive surprise invoice) or rate-limit the metric, destroying your dashboard visibility.
 * **The Missing Piece: Cardinality Guardian (The Surgical Guard)**
   Cardinality Guardian acts as a dynamic safety net just before the TSDB. Instead of relying on static rules or dropping entire metrics, it uses HyperLogLog++ to track cardinality in real-time. When a specific label explodes, it *surgically strips only the offending label*, ensuring the core metric (like overall HTTP request rate) still reaches your TSDB safely and cheaply.
+
+---
+
+### 11. Cardinality Guardian uses `otel.metric.overflow` — doesn't the SDK already do that? What's the difference?
+
+The attribute name is the same, but the behavior is completely different.
+
+**What the SDK does:**
+When an OTel SDK hits its internal cardinality limit (designed to prevent application OOM), it collapses all excess data points into a single catch-all bucket with `otel.metric.overflow: true`. The original attribute values are **discarded** — you cannot tell which `region`, `api`, or `error.type` produced the overflow. The data is effectively destroyed at the source.
+
+**What Cardinality Guardian does:**
+In `tag_only: true` mode, the processor **preserves every single attribute** on the data point and simply *adds* `otel.metric.overflow: true` as a tag. Nothing is collapsed, nothing is discarded. The original `error.type`, `region`, and every other attribute remain fully intact on the data point.
+
+This means you can route the tagged data points to a secondary destination (S3, a dev TSDB, or a debug exporter) and still query the full, un-collapsed attributes for root-cause analysis. The SDK's overflow bucket gives you a count; Cardinality Guardian's tag gives you full forensic detail.
+
+| | SDK `otel.metric.overflow` | Cardinality Guardian `otel.metric.overflow` |
+|---|---|---|
+| **Where it runs** | Inside the application | Inside the OTel Collector pipeline |
+| **Original attributes** | Discarded (collapsed into one bucket) | Fully preserved |
+| **Purpose** | Prevent application OOM | Enable routing, observability, and safe rollout |
+| **Reversible** | No — data is lost at the source | Yes — switch between modes at any time |
+
+**Where the data ends up depends on the mode:**
+
+**Enforcement mode (`tag_only: false`):**
+The offending attribute is stripped. Your TSDB receives clean, cost-efficient metrics:
+```
+TSDB receives:  {region="us-east", status="200"}  ← core dimensions intact, dashboards keep working
+```
+
+**Tag-only mode (`tag_only: true`) + a routing processor:**
+Nothing is stripped. The processor tags overflow data points, and a downstream routing processor forks them:
+```
+TSDB receives:    {region="us-east", status="200"}  ← only clean, non-overflow metrics
+Cheap storage:    {region="us-east", status="200", error.type="Lock wait timeout; txn=a3f9c...", otel.metric.overflow: true}  ← full detail preserved for forensics
+```
