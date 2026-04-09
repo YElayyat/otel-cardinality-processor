@@ -33,7 +33,7 @@ body:
       description: Versions, OS, and Collector configuration.
       placeholder: |
         - Collector Version: v0.148.0
-        - Cardinality Guardian: v1.0.0
+        - Cardinality Guardian: v1.0.2
         - OS: Linux/macOS
     validations:
       required: true
