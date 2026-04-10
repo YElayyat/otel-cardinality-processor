@@ -71,7 +71,6 @@ import (
         "context"
         "hash/maphash"
         "math"
-        "sort"
         "sync"
         "sync/atomic"
         "time"
@@ -690,9 +689,9 @@ func (p *cardinalityProcessor) rotate() {
         // across all shards. It is populated before rotation resets the
         // cached estimates, then sorted to extract the Top-N offenders.
         topN := p.config.TopOffendersCount
-        var allDeltas []offenderEntry
+        var topBuf []offenderEntry
         if topN > 0 {
-                allDeltas = make([]offenderEntry, 0, 256) // rough pre-alloc
+                topBuf = make([]offenderEntry, 0, topN)
         }
 
         for _, shard := range p.shards {
@@ -706,7 +705,7 @@ func (p *cardinalityProcessor) rotate() {
                 shard.mu.RUnlock()
 
                 // Snapshot deltas before rotation resets the cached estimates.
-                allDeltas = collectShardDeltas(entries, allDeltas, topN)
+                topBuf = collectShardDeltas(entries, topBuf, topN)
 
                 // Pull fresh sketches from the pool entirely outside any lock.
                 fresh := make([]*hyperloglog.Sketch, len(entries))
@@ -740,56 +739,95 @@ func (p *cardinalityProcessor) rotate() {
                 }
         }
 
-        p.publishTopOffenders(allDeltas, topN)
+        p.publishTopOffenders(topBuf)
 }
 
-// collectShardDeltas appends the pre-rotation cardinality delta of each active
-// tracker in a shard to the allDeltas slice. It is called from rotate() before
-// the shard's trackers are rotated, so cachedCurr/cachedPrev still reflect the
-// epoch that is about to end. Only trackers with a positive delta (growth) are
-// included. The function is a no-op when topN ≤ 0.
-func collectShardDeltas(entries []trackerEntry, allDeltas []offenderEntry, topN int) []offenderEntry {
+// collectShardDeltas maintains a bounded top-N buffer of the highest-delta
+// trackers using a linear min-scan. The buffer never grows beyond topN entries,
+// so memory usage is O(topN) regardless of how many trackers exist. For each
+// candidate tracker, if the buffer is not yet full the entry is appended;
+// otherwise the candidate replaces the current minimum only if its delta is
+// larger. The min-element index is recomputed via a simple linear scan over
+// the (tiny, typically 10-element) buffer — no heap or sort allocations.
+func collectShardDeltas(entries []trackerEntry, topBuf []offenderEntry, topN int) []offenderEntry {
         if topN <= 0 {
-                return allDeltas
+                return topBuf
         }
         for _, e := range entries {
                 e.t.mu.Lock()
                 curr, prev := e.t.cachedCurr, e.t.cachedPrev
                 e.t.mu.Unlock()
-                if curr > prev {
-                        allDeltas = append(allDeltas, offenderEntry{
+                if curr <= prev {
+                        continue
+                }
+                delta := curr - prev
+
+                if len(topBuf) < topN {
+                        // Buffer not full yet — just append.
+                        topBuf = append(topBuf, offenderEntry{
                                 metricName: e.key.metricName,
                                 labelKey:   e.key.attrKey,
-                                delta:      curr - prev,
+                                delta:      delta,
                         })
+                        continue
+                }
+
+                // Buffer is full — find the minimum element via linear scan.
+                minIdx := 0
+                for i := 1; i < len(topBuf); i++ {
+                        if topBuf[i].delta < topBuf[minIdx].delta {
+                                minIdx = i
+                        }
+                }
+                // Replace only if the candidate beats the current minimum.
+                if delta > topBuf[minIdx].delta {
+                        topBuf[minIdx] = offenderEntry{
+                                metricName: e.key.metricName,
+                                labelKey:   e.key.attrKey,
+                                delta:      delta,
+                        }
                 }
         }
-        return allDeltas
+        return topBuf
 }
 
-// publishTopOffenders sorts the collected deltas by descending magnitude,
-// truncates to topN, and stores the result under topOffendersMu for the
-// telemetry callback to read. It also emits an Info-level log line for the
-// single highest offender to aid grep-based debugging. This is a no-op when
-// topN ≤ 0 or when no trackers had a positive delta.
-func (p *cardinalityProcessor) publishTopOffenders(allDeltas []offenderEntry, topN int) {
-        if topN <= 0 || len(allDeltas) == 0 {
+// publishTopOffenders sorts the bounded top-N buffer by descending delta and
+// stores the result under topOffendersMu for the telemetry callback to read.
+// It also emits an Info-level log line for the single highest offender to aid
+// grep-based debugging. This is a no-op when the buffer is empty.
+func (p *cardinalityProcessor) publishTopOffenders(topBuf []offenderEntry) {
+        if len(topBuf) == 0 {
                 return
         }
-        sort.Slice(allDeltas, func(i, j int) bool {
-                return allDeltas[i].delta > allDeltas[j].delta
-        })
-        if len(allDeltas) > topN {
-                allDeltas = allDeltas[:topN]
-        }
+        // Sort the small bounded buffer (typically 10 elements) for deterministic
+        // gauge emission order. This is a single sort of a tiny slice, not the
+        // unbounded sort that the previous implementation used.
+        sortOffenders(topBuf)
         p.topOffendersMu.Lock()
-        p.topOffenders = allDeltas
+        p.topOffenders = topBuf
         p.topOffendersMu.Unlock()
 
         p.logger.Info("Top cardinality offender",
-                zap.String("metric", allDeltas[0].metricName),
-                zap.String("label", allDeltas[0].labelKey),
-                zap.Uint64("delta", allDeltas[0].delta))
+                zap.String("metric", topBuf[0].metricName),
+                zap.String("label", topBuf[0].labelKey),
+                zap.Uint64("delta", topBuf[0].delta))
+}
+
+// sortOffenders performs an insertion sort on a small offenderEntry slice in
+// descending delta order. Insertion sort is optimal here because the slice is
+// bounded to TopOffendersCount (default 10) — well below the crossover point
+// where quicksort becomes worthwhile — and it avoids the closure allocation
+// that sort.Slice would incur.
+func sortOffenders(s []offenderEntry) {
+        for i := 1; i < len(s); i++ {
+                key := s[i]
+                j := i - 1
+                for j >= 0 && s[j].delta < key.delta {
+                        s[j+1] = s[j]
+                        j--
+                }
+                s[j+1] = key
+        }
 }
 
 // Start is called by the OTel Collector host when the pipeline is starting.
