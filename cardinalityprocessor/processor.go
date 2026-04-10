@@ -414,7 +414,6 @@ func newCardinalityProcessor(ctx context.Context, cfg *Config, set processor.Set
                 cancel:                      cancel,
                 tagOnly:                     cfg.TagOnly,
                 estimatedCostPerMetricMonth: cfg.EstimatedCostPerMetricMonth,
-                topOffenders:               make([]offenderEntry, 0, cfg.TopOffendersCount),
         }
 
         for i := range p.shards {
