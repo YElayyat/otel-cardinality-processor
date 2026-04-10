@@ -108,6 +108,10 @@ The `processor_top_offenders` gauge reports the highest-growth `(metric_name, la
 ### Bounded Tracker Count Tracking
 To prevent unbound memory growth against highly malicious or misconfigured inputs, you can optionally configure `max_tracker_count`. Because this operates on the hot path, Cardinality Guardian employs a strict O(1) **rejection-on-full** strategy rather than LRU cache eviction. When the limit is reached, new incoming target pairs are silently ignored (they are not tracked, and therefore their attributes are never dropped). The processor frees up memory dynamically using its built-in background stale tracker eviction cycle, so slots naturally become available again without any hot path performance penalties.
 
+### Per-Metric Cardinality Overrides
+The optional `metric_overrides` map allows specific metrics to use a different cardinality delta limit than the global `max_cardinality_delta_per_epoch`. This is useful when high-traffic metrics like `http.server.request.duration` legitimately need higher headroom while the global safety net remains tight for all other metrics. The override lookup is a single read-only `map[string]int` access — O(1), zero-allocation, and completely lock-free since the map is immutable after construction.
+
+
 ### Standard Pipeline Metrics
 Alongside Cardinality Guardian's custom metrics, the OpenTelemetry Collector automatically emits standard pipeline telemetry:
 

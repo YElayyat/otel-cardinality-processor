@@ -967,5 +967,15 @@ func (p *cardinalityProcessor) shouldDrop(metricName string, attrKey string, att
 		return false
 	}
 
-	return (currCount - prevCount) > uint64(p.config.MaxCardinalityDeltaPerEpoch)
+	return (currCount - prevCount) > p.getLimit(metricName)
+}
+
+// getLimit returns the per-metric cardinality limit for the given metric name,
+// falling back to the global MaxCardinalityDeltaPerEpoch if no override exists.
+// The map is read-only after construction — no lock needed.
+func (p *cardinalityProcessor) getLimit(metricName string) uint64 {
+	if v, ok := p.config.MetricOverrides[metricName]; ok {
+		return uint64(v)
+	}
+	return uint64(p.config.MaxCardinalityDeltaPerEpoch)
 }
