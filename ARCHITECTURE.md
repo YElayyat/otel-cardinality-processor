@@ -102,6 +102,9 @@ Once the metrics are flowing to your TSDB, extrapolate the current 5-minute drop
 rate(estimated_savings_dollars_total[5m]) * 60 * 60 * 24 * 30
 ```
 
+### Top-N Offender Extraction
+The `processor_top_offenders` gauge reports the highest-growth `(metric_name, label_key)` pairs during the sliding epoch. This is computed entirely in the background `rotate()` goroutine, ensuring zero impact on the `ConsumeMetrics` hot path. To prevent unbounded memory growth during massive cardinality explosions (e.g. 1 million new active tracking keys), the processor uses a bounded $O(\text{topN})$ min-scan algorithm instead of a full slice sort. This guarantees exactly zero heap allocations beyond the tiny fixed-size buffer.
+
 ### Standard Pipeline Metrics
 Alongside Cardinality Guardian's custom metrics, the OpenTelemetry Collector automatically emits standard pipeline telemetry:
 
