@@ -342,11 +342,7 @@ type cardinalityProcessor struct {
         // avoid an extra pointer dereference into the Config on every data point.
         tagOnly bool
 
-        // warnedMetrics tracks metric names for which an informational log
-        // message about unsupported types has already been emitted. This prevents
-        // per-data-point warn log storms for metric types that the processor
-        // does not enforce (currently none, but retained for forward-compatibility).
-        warnedMetrics sync.Map
+
 
         // estimatedCostPerMetricMonth mirrors Config.EstimatedCostPerMetricMonth for
         // the same reason: it is read on every attribute that exceeds the limit and
@@ -503,11 +499,9 @@ func (p *cardinalityProcessor) ConsumeMetrics(ctx context.Context, md pmetric.Me
 }
 
 // processMetric dispatches a single metric to the appropriate data-point
-// handler based on its type. Gauge and Sum metrics contain NumberDataPoints;
-// Histogram metrics contain HistogramDataPoints. ExponentialHistogram and
-// Summary metrics are passed through unchanged — cardinality checking is not
-// applied to them — and a warning is emitted so that operators are aware that
-// enforcement coverage is partial for those types.
+// handler based on its type. All five OpenTelemetry metric types (Gauge, Sum,
+// Histogram, ExponentialHistogram, and Summary) are fully supported, and
+// attribute cardinality limits are enforced on all of their data points.
 func (p *cardinalityProcessor) processMetric(m pmetric.Metric) {
 
         switch m.Type() {
