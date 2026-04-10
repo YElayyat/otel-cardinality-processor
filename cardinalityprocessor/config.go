@@ -78,6 +78,14 @@ type Config struct {
 	//
 	// Must be ≥ 0.
 	EstimatedCostPerMetricMonth float64 `mapstructure:"estimated_cost_per_metric_month"`
+
+	// TopOffendersCount is the number of highest-delta (metric, label) pairs
+	// to report via the "processor_top_offenders" gauge. The snapshot is
+	// computed once per epoch rotation, so it adds no hot-path cost.
+	//
+	// Set to 0 to disable the Top-N gauge entirely.
+	// Must be ≥ 0.
+	TopOffendersCount int `mapstructure:"top_offenders_count"`
 }
 
 // Validate checks that all required Config fields are within their acceptable
@@ -93,6 +101,9 @@ func (c *Config) Validate() error {
 	}
 	if c.EstimatedCostPerMetricMonth < 0 {
 		return fmt.Errorf("estimated_cost_per_metric_month cannot be negative")
+	}
+	if c.TopOffendersCount < 0 {
+		return fmt.Errorf("top_offenders_count cannot be negative")
 	}
 	return nil
 }

@@ -71,6 +71,7 @@ import (
         "context"
         "hash/maphash"
         "math"
+        "sort"
         "sync"
         "sync/atomic"
         "time"
@@ -82,6 +83,7 @@ import (
         "go.opentelemetry.io/collector/pdata/pcommon"
         "go.opentelemetry.io/collector/pdata/pmetric"
         "go.opentelemetry.io/collector/processor"
+        "go.opentelemetry.io/otel/attribute"
         "go.opentelemetry.io/otel/metric"
         "go.uber.org/zap"
 )
@@ -276,6 +278,24 @@ func newTracker() *tracker {
         }
 }
 
+// offenderEntry holds a snapshot of a single high-delta tracker for telemetry
+// reporting. It is produced during rotate() and consumed by the telemetry
+// callback. The struct is intentionally small and value-typed so that the
+// snapshot slice can be swapped atomically under a short mutex.
+type offenderEntry struct {
+        metricName string
+        labelKey   string
+        delta      uint64
+}
+
+// trackerEntry pairs a trackerKey with its tracker pointer. It is used by
+// rotate() and collectShardDeltas() to snapshot shard contents outside of
+// the shard lock.
+type trackerEntry struct {
+        key trackerKey
+        t   *tracker
+}
+
 // trackerShard is an independently-locked partition of the global trackers
 // map. The 256-shard design means that two goroutines processing metrics with
 // different names will, with high probability, land in different shards and
@@ -363,6 +383,12 @@ type cardinalityProcessor struct {
         // until the SDK's MeterProvider is shut down — potentially leaking the
         // entire 256-shard tracker map across pipeline reconfigurations.
         gaugeRegistration metric.Registration
+
+        // topOffenders holds the most recent Top-N snapshot, computed during
+        // rotate(). Read by the telemetry callback; written by rotate().
+        // Protected by topOffendersMu.
+        topOffenders   []offenderEntry
+        topOffendersMu sync.RWMutex
 }
 
 // newCardinalityProcessor constructs a cardinalityProcessor, registers its
@@ -389,6 +415,7 @@ func newCardinalityProcessor(ctx context.Context, cfg *Config, set processor.Set
                 cancel:                      cancel,
                 tagOnly:                     cfg.TagOnly,
                 estimatedCostPerMetricMonth: cfg.EstimatedCostPerMetricMonth,
+                topOffenders:               make([]offenderEntry, 0, cfg.TopOffendersCount),
         }
 
         for i := range p.shards {
@@ -429,6 +456,14 @@ func newCardinalityProcessor(ctx context.Context, cfg *Config, set processor.Set
                 return nil, err
         }
 
+        gaugeTopOffenders, err := meter.Int64ObservableGauge(
+                "processor_top_offenders",
+                metric.WithDescription("Cardinality delta of the top-N highest-growth (metric, label) pairs from the last epoch rotation."),
+        )
+        if err != nil {
+                return nil, err
+        }
+
         p.gaugeRegistration, err = meter.RegisterCallback(
                 func(_ context.Context, o metric.Observer) error {
                         // 1. Report active trackers
@@ -448,9 +483,21 @@ func newCardinalityProcessor(ctx context.Context, cfg *Config, set processor.Set
                         roundedSavings := math.Round(savings*100) / 100
                         o.ObserveFloat64(counterSavings, roundedSavings)
 
+                        // 3. Report top-N offenders with metric_name and label_key attributes
+                        p.topOffendersMu.RLock()
+                        for _, entry := range p.topOffenders {
+                                o.ObserveInt64(gaugeTopOffenders, int64(entry.delta),
+                                        metric.WithAttributes(
+                                                attribute.String("metric_name", entry.metricName),
+                                                attribute.String("label_key", entry.labelKey),
+                                        ),
+                                )
+                        }
+                        p.topOffendersMu.RUnlock()
+
                         return nil
                 },
-                gaugeActive, counterStripped, counterSavings,
+                gaugeActive, counterStripped, counterSavings, gaugeTopOffenders,
         )
         if err != nil {
                 return nil, err
@@ -639,19 +686,27 @@ func (p *cardinalityProcessor) isProtected(key string) bool {
 func (p *cardinalityProcessor) rotate() {
         p.logger.Debug("Rotating cardinality sketches")
 
+        // allDeltas collects the pre-rotation delta for every active tracker
+        // across all shards. It is populated before rotation resets the
+        // cached estimates, then sorted to extract the Top-N offenders.
+        topN := p.config.TopOffendersCount
+        var allDeltas []offenderEntry
+        if topN > 0 {
+                allDeltas = make([]offenderEntry, 0, 256) // rough pre-alloc
+        }
+
         for _, shard := range p.shards {
                 // Snapshot tracker references under a shard read lock — no sketch
                 // allocations inside the lock.
                 shard.mu.RLock()
-                type trackerEntry struct {
-                        key trackerKey
-                        t   *tracker
-                }
                 entries := make([]trackerEntry, 0, len(shard.trackers))
                 for k, t := range shard.trackers {
                         entries = append(entries, trackerEntry{key: k, t: t})
                 }
                 shard.mu.RUnlock()
+
+                // Snapshot deltas before rotation resets the cached estimates.
+                allDeltas = collectShardDeltas(entries, allDeltas, topN)
 
                 // Pull fresh sketches from the pool entirely outside any lock.
                 fresh := make([]*hyperloglog.Sketch, len(entries))
@@ -684,6 +739,57 @@ func (p *cardinalityProcessor) rotate() {
                                 zap.Int("count", len(staleKeys)))
                 }
         }
+
+        p.publishTopOffenders(allDeltas, topN)
+}
+
+// collectShardDeltas appends the pre-rotation cardinality delta of each active
+// tracker in a shard to the allDeltas slice. It is called from rotate() before
+// the shard's trackers are rotated, so cachedCurr/cachedPrev still reflect the
+// epoch that is about to end. Only trackers with a positive delta (growth) are
+// included. The function is a no-op when topN ≤ 0.
+func collectShardDeltas(entries []trackerEntry, allDeltas []offenderEntry, topN int) []offenderEntry {
+        if topN <= 0 {
+                return allDeltas
+        }
+        for _, e := range entries {
+                e.t.mu.Lock()
+                curr, prev := e.t.cachedCurr, e.t.cachedPrev
+                e.t.mu.Unlock()
+                if curr > prev {
+                        allDeltas = append(allDeltas, offenderEntry{
+                                metricName: e.key.metricName,
+                                labelKey:   e.key.attrKey,
+                                delta:      curr - prev,
+                        })
+                }
+        }
+        return allDeltas
+}
+
+// publishTopOffenders sorts the collected deltas by descending magnitude,
+// truncates to topN, and stores the result under topOffendersMu for the
+// telemetry callback to read. It also emits an Info-level log line for the
+// single highest offender to aid grep-based debugging. This is a no-op when
+// topN ≤ 0 or when no trackers had a positive delta.
+func (p *cardinalityProcessor) publishTopOffenders(allDeltas []offenderEntry, topN int) {
+        if topN <= 0 || len(allDeltas) == 0 {
+                return
+        }
+        sort.Slice(allDeltas, func(i, j int) bool {
+                return allDeltas[i].delta > allDeltas[j].delta
+        })
+        if len(allDeltas) > topN {
+                allDeltas = allDeltas[:topN]
+        }
+        p.topOffendersMu.Lock()
+        p.topOffenders = allDeltas
+        p.topOffendersMu.Unlock()
+
+        p.logger.Info("Top cardinality offender",
+                zap.String("metric", allDeltas[0].metricName),
+                zap.String("label", allDeltas[0].labelKey),
+                zap.Uint64("delta", allDeltas[0].delta))
 }
 
 // Start is called by the OTel Collector host when the pipeline is starting.
