@@ -111,7 +111,6 @@ To prevent unbound memory growth against highly malicious or misconfigured input
 ### Per-Metric Cardinality Overrides
 The optional `metric_overrides` map allows specific metrics to use a different cardinality delta limit than the global `max_cardinality_delta_per_epoch`. This is useful when high-traffic metrics like `http.server.request.duration` legitimately need higher headroom while the global safety net remains tight for all other metrics. The override lookup is a single read-only `map[string]int` access — O(1), zero-allocation, and completely lock-free since the map is immutable after construction.
 
-
 ### Standard Pipeline Metrics
 Alongside Cardinality Guardian's custom metrics, the OpenTelemetry Collector automatically emits standard pipeline telemetry:
 

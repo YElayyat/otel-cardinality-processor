@@ -127,6 +127,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("max_tracker_count must be between 0 and 10,000,000")
 	}
 	for name, limit := range c.MetricOverrides {
+		if name == "" {
+			return fmt.Errorf("metric_overrides contains an empty metric name")
+		}
 		if limit <= 0 {
 			return fmt.Errorf("metric_overrides[%q] must be greater than 0", name)
 		}
