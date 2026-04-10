@@ -102,8 +102,8 @@ func (c *Config) Validate() error {
 	if c.EstimatedCostPerMetricMonth < 0 {
 		return fmt.Errorf("estimated_cost_per_metric_month cannot be negative")
 	}
-	if c.TopOffendersCount < 0 {
-		return fmt.Errorf("top_offenders_count cannot be negative")
+	if c.TopOffendersCount < 0 || c.TopOffendersCount > 500 {
+		return fmt.Errorf("top_offenders_count must be between 0 and 500")
 	}
 	return nil
 }
