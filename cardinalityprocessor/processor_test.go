@@ -905,3 +905,196 @@ func TestTopOffenders(t *testing.T) {
 
 	t.Logf("SUCCESS: Top 3 offenders reported correctly: %v", dps)
 }
+
+// TestSortOffenders exercises the sortOffenders insertion sort with edge cases:
+// empty slice, single element, reverse-sorted input, and already-sorted input.
+func TestSortOffenders(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  []offenderEntry
+		expect []uint64 // expected deltas in descending order
+	}{
+		{
+			name:   "empty",
+			input:  nil,
+			expect: nil,
+		},
+		{
+			name:   "single element",
+			input:  []offenderEntry{{delta: 42}},
+			expect: []uint64{42},
+		},
+		{
+			name: "reverse sorted (ascending → must become descending)",
+			input: []offenderEntry{
+				{delta: 1}, {delta: 5}, {delta: 10}, {delta: 50},
+			},
+			expect: []uint64{50, 10, 5, 1},
+		},
+		{
+			name: "already sorted descending (no-op)",
+			input: []offenderEntry{
+				{delta: 100}, {delta: 50}, {delta: 10}, {delta: 1},
+			},
+			expect: []uint64{100, 50, 10, 1},
+		},
+		{
+			name: "mixed order",
+			input: []offenderEntry{
+				{delta: 7}, {delta: 3}, {delta: 99}, {delta: 15}, {delta: 1},
+			},
+			expect: []uint64{99, 15, 7, 3, 1},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sortOffenders(tc.input)
+			var got []uint64
+			for _, e := range tc.input {
+				got = append(got, e.delta)
+			}
+			assert.Equal(t, tc.expect, got)
+		})
+	}
+}
+
+// TestCollectShardDeltas_Disabled verifies that collectShardDeltas is a no-op
+// when topN is 0 (feature disabled).
+func TestCollectShardDeltas_Disabled(t *testing.T) {
+	entries := []trackerEntry{
+		{key: trackerKey{metricName: "m", attrKey: "k"}, t: newTracker()},
+	}
+	// Simulate some growth on the tracker.
+	entries[0].t.cachedCurr = 100
+	entries[0].t.cachedPrev = 0
+
+	result := collectShardDeltas(entries, nil, 0)
+	assert.Nil(t, result, "collectShardDeltas must return nil when topN=0")
+}
+
+// TestTopOffenders_Disabled verifies that no gauge data points are emitted
+// when TopOffendersCount is set to 0.
+func TestTopOffenders_Disabled(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 100,
+		EpochDurationSeconds:        300,
+		TopOffendersCount:           0, // Feature disabled
+	}
+
+	reader := sdkmetric.NewManualReader()
+	sdkProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() {
+		if err := sdkProvider.Shutdown(context.Background()); err != nil {
+			t.Errorf("sdk provider shutdown: %v", err)
+		}
+	}()
+
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	set.TelemetrySettings.MeterProvider = sdkProvider
+
+	next := new(consumertest.MetricsSink)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	p := proc.(*cardinalityProcessor)
+
+	// Add some data.
+	for i := 0; i < 10; i++ {
+		p.shouldDrop("metric_a", "label_a", fmt.Sprintf("val_%d", i))
+	}
+
+	p.rotate()
+
+	var collected metricdata.ResourceMetrics
+	err = reader.Collect(context.Background(), &collected)
+	require.NoError(t, err)
+
+	// processor_top_offenders should either not be present at all (OTel SDK
+	// omits empty gauges) or present with 0 data points.
+	var found bool
+	for _, sm := range collected.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name == "processor_top_offenders" {
+				found = true
+				gaugeData, ok := m.Data.(metricdata.Gauge[int64])
+				require.True(t, ok)
+				assert.Empty(t, gaugeData.DataPoints,
+					"when TopOffendersCount=0, no data points should be emitted")
+			}
+		}
+	}
+	if !found {
+		t.Log("processor_top_offenders gauge not emitted (expected when disabled)")
+	}
+}
+
+// TestTopOffenders_EvictionAndReplacement verifies that the bounded min-scan
+// correctly evicts the smallest entry when a larger candidate arrives, and
+// that candidates smaller than the minimum are rejected.
+func TestTopOffenders_EvictionAndReplacement(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 10000,
+		EpochDurationSeconds:        300,
+		TopOffendersCount:           2, // Only keep top 2
+	}
+
+	reader := sdkmetric.NewManualReader()
+	sdkProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() {
+		if err := sdkProvider.Shutdown(context.Background()); err != nil {
+			t.Errorf("sdk provider shutdown: %v", err)
+		}
+	}()
+
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	set.TelemetrySettings.MeterProvider = sdkProvider
+
+	next := new(consumertest.MetricsSink)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	p := proc.(*cardinalityProcessor)
+
+	// key_small: 5 unique values (will be evicted)
+	for i := 0; i < 5; i++ {
+		p.shouldDrop("m", "key_small", fmt.Sprintf("v%d", i))
+	}
+	// key_medium: 50 unique values
+	for i := 0; i < 50; i++ {
+		p.shouldDrop("m", "key_medium", fmt.Sprintf("v%d", i))
+	}
+	// key_large: 200 unique values (should evict key_small)
+	for i := 0; i < 200; i++ {
+		p.shouldDrop("m", "key_large", fmt.Sprintf("v%d", i))
+	}
+	// key_tiny: 2 unique values (should be rejected — smaller than both survivors)
+	for i := 0; i < 2; i++ {
+		p.shouldDrop("m", "key_tiny", fmt.Sprintf("v%d", i))
+	}
+
+	p.rotate()
+
+	var collected metricdata.ResourceMetrics
+	err = reader.Collect(context.Background(), &collected)
+	require.NoError(t, err)
+
+	topMetric := findMetricByName(t, collected, "processor_top_offenders")
+	gaugeData, ok := topMetric.Data.(metricdata.Gauge[int64])
+	require.True(t, ok)
+	require.Len(t, gaugeData.DataPoints, 2)
+
+	// Collect the reported labels.
+	var labels []string
+	for _, dp := range gaugeData.DataPoints {
+		lk, _ := dp.Attributes.Value(attribute.Key("label_key"))
+		labels = append(labels, lk.AsString())
+	}
+
+	assert.Contains(t, labels, "key_large", "key_large (200) must survive")
+	assert.Contains(t, labels, "key_medium", "key_medium (50) must survive")
+	assert.NotContains(t, labels, "key_small", "key_small (5) must be evicted")
+	assert.NotContains(t, labels, "key_tiny", "key_tiny (2) must be rejected")
+
+	t.Logf("SUCCESS: Eviction works — survivors: %v", labels)
+}
