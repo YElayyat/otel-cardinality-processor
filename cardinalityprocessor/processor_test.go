@@ -1098,3 +1098,100 @@ func TestTopOffenders_EvictionAndReplacement(t *testing.T) {
 
 	t.Logf("SUCCESS: Eviction works — survivors: %v", labels)
 }
+
+// TestMaxTrackerCount_Disabled verifies that when MaxTrackerCount is 0,
+// an unlimited number of trackers can be created.
+func TestMaxTrackerCount_Disabled(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 1,
+		EpochDurationSeconds:        300,
+		MaxTrackerCount:             0,
+	}
+
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	next := new(consumertest.MetricsSink)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	p := proc.(*cardinalityProcessor)
+
+	for i := 0; i < 1000; i++ {
+		p.shouldDrop(fmt.Sprintf("metric_%d", i), "lbl", "val_1")
+	}
+
+	require.Equal(t, int64(1000), p.trackerCount.Load(), "should allow all trackers when disabled")
+}
+
+// TestMaxTrackerCount_Rejection verifies that when MaxTrackerCount is reached,
+// no new trackers are created, and they simply pass through silently.
+func TestMaxTrackerCount_Rejection(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 1,
+		EpochDurationSeconds:        300,
+		MaxTrackerCount:             50,
+	}
+
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	next := new(consumertest.MetricsSink)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	p := proc.(*cardinalityProcessor)
+
+	// Attempt to create 100 unique trackers
+	for i := 0; i < 100; i++ {
+		// shouldDrop returns true when limit exceeded, but we just verify the count
+		p.shouldDrop(fmt.Sprintf("metric_%d", i), "lbl", "val_1")
+	}
+
+	require.Equal(t, int64(50), p.trackerCount.Load(), "should stop creating trackers at 50")
+	require.Equal(t, int64(50), p.trackersRejected.Load(), "should have rejected 50 trackers")
+}
+
+// TestMaxTrackerCount_EvictionFreesSlots verifies that stale tracker eviction
+// properly decrements trackerCount, allowing new trackers to be accepted again.
+func TestMaxTrackerCount_EvictionFreesSlots(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 1,
+		EpochDurationSeconds:        300,
+		MaxTrackerCount:             10,
+	}
+
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	next := new(consumertest.MetricsSink)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	p := proc.(*cardinalityProcessor)
+
+	// Fill to capacity
+	for i := 0; i < 10; i++ {
+		p.shouldDrop(fmt.Sprintf("metric_%d", i), "lbl", "val_1")
+	}
+
+	require.Equal(t, int64(10), p.trackerCount.Load(), "filled to capacity")
+
+	// Attempt 5 more, they should be rejected
+	for i := 10; i < 15; i++ {
+		p.shouldDrop(fmt.Sprintf("metric_%d", i), "lbl", "val_1")
+	}
+	require.Equal(t, int64(10), p.trackerCount.Load(), "still at capacity")
+	require.Equal(t, int64(5), p.trackersRejected.Load(), "rejected 5")
+
+	// Rotate enough times to evict all stale trackers.
+	// 1st rotation resets the cached counts, 2nd rotation sets staleEpochs=1,
+	// 3rd rotation sets staleEpochs=2 (which triggers eviction limit).
+	p.rotate()
+	p.rotate()
+	p.rotate()
+
+	require.Equal(t, int64(0), p.trackerCount.Load(), "eviction should clear trackerCount")
+
+	// Verify we can now accept new trackers
+	for i := 15; i < 20; i++ {
+		p.shouldDrop(fmt.Sprintf("metric_%d", i), "lbl", "val_1")
+	}
+
+	require.Equal(t, int64(5), p.trackerCount.Load(), "new trackers accepted after eviction")
+	require.Equal(t, int64(5), p.trackersRejected.Load(), "refusals count remains unchanged from before")
+}

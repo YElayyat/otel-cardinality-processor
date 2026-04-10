@@ -63,6 +63,7 @@ func createDefaultConfig() component.Config {
 		TagOnly:                     false, // Default to hard-drop for backward compatibility
 		EstimatedCostPerMetricMonth: 0.05,  // Default to $0.05 per metric/month
 		TopOffendersCount:           10,    // Report the top 10 exploding (metric, label) pairs
+		MaxTrackerCount:             0,     // Default to unlimited
 	}
 }
 
