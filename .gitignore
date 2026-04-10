@@ -39,3 +39,4 @@ build/
 # Benchmark results (machine-specific, not committed)
 test/benchmark/results/
 *.prof
+.DS_Store

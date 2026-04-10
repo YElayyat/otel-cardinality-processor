@@ -3,6 +3,7 @@ package cardinalityprocessor
 import (
         "context"
         "fmt"
+        "sort"
         "sync"
         "sync/atomic"
         "testing"
@@ -13,6 +14,7 @@ import (
         "go.opentelemetry.io/collector/consumer/consumertest"
         "go.opentelemetry.io/collector/pdata/pmetric"
         "go.opentelemetry.io/collector/processor/processortest"
+        "go.opentelemetry.io/otel/attribute"
         sdkmetric "go.opentelemetry.io/otel/sdk/metric"
         "go.opentelemetry.io/otel/sdk/metric/metricdata"
         "go.uber.org/goleak"
@@ -797,4 +799,109 @@ func TestCardinalityProcessor_EpochRotation(t *testing.T) {
 	shard.mu.RLock()
 	require.NotNil(t, tracker.previous)
 	shard.mu.RUnlock()
+}
+
+// TestTopOffenders verifies that the processor_top_offenders gauge correctly
+// reports the highest-delta (metric, label) pairs after an epoch rotation.
+//
+// Setup:
+//   - TopOffendersCount = 3
+//   - 5 different label keys are populated with varying unique-value counts:
+//     key_0: 20 values, key_1: 15 values, key_2: 10 values,
+//     key_3: 5 values, key_4: 1 value
+//
+// After rotate(), the gauge should emit exactly 3 data points (top 3 by delta),
+// ordered by descending delta, with metric_name and label_key attributes.
+func TestTopOffenders(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 100, // High limit so nothing is dropped
+		EpochDurationSeconds:        300,
+		TopOffendersCount:           3,
+	}
+
+	reader := sdkmetric.NewManualReader()
+	sdkProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() {
+		if err := sdkProvider.Shutdown(context.Background()); err != nil {
+			t.Errorf("sdk provider shutdown: %v", err)
+		}
+	}()
+
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	set.TelemetrySettings.MeterProvider = sdkProvider
+
+	next := new(consumertest.MetricsSink)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	p := proc.(*cardinalityProcessor)
+
+	// Populate 5 label keys with varying unique-value counts.
+	// key_0: 20 unique values → delta 20
+	// key_1: 15 unique values → delta 15
+	// key_2: 10 unique values → delta 10
+	// key_3:  5 unique values → delta  5
+	// key_4:  1 unique value  → delta  1
+	valueCounts := []int{20, 15, 10, 5, 1}
+	for keyIdx, count := range valueCounts {
+		key := fmt.Sprintf("key_%d", keyIdx)
+		for v := 0; v < count; v++ {
+			p.shouldDrop("offender_metric", key, fmt.Sprintf("val_%d", v))
+		}
+	}
+
+	// Trigger rotation to compute the top-N snapshot.
+	p.rotate()
+
+	// Collect the telemetry.
+	var collected metricdata.ResourceMetrics
+	err = reader.Collect(context.Background(), &collected)
+	require.NoError(t, err)
+
+	// Find the processor_top_offenders gauge.
+	topMetric := findMetricByName(t, collected, "processor_top_offenders")
+	gaugeData, ok := topMetric.Data.(metricdata.Gauge[int64])
+	require.True(t, ok, "processor_top_offenders must be a Gauge[int64]")
+
+	// Assert we get exactly TopOffendersCount data points.
+	require.Len(t, gaugeData.DataPoints, 3,
+		"expected exactly 3 top offender data points (TopOffendersCount=3)")
+
+	// Verify that data points are the top 3 by delta (key_0=20, key_1=15, key_2=10)
+	// and that each carries the correct attributes.
+	expectedKeys := []string{"key_0", "key_1", "key_2"}
+	expectedDeltas := []int64{20, 15, 10}
+
+	// Build a map of label_key → delta from the collected data points.
+	type dpInfo struct {
+		metricName string
+		labelKey   string
+		delta      int64
+	}
+	var dps []dpInfo
+	for _, dp := range gaugeData.DataPoints {
+		mn, mnOk := dp.Attributes.Value(attribute.Key("metric_name"))
+		lk, lkOk := dp.Attributes.Value(attribute.Key("label_key"))
+		require.True(t, mnOk, "data point must have metric_name attribute")
+		require.True(t, lkOk, "data point must have label_key attribute")
+		dps = append(dps, dpInfo{
+			metricName: mn.AsString(),
+			labelKey:   lk.AsString(),
+			delta:      dp.Value,
+		})
+	}
+
+	// Sort by descending delta for deterministic assertion.
+	sort.Slice(dps, func(i, j int) bool { return dps[i].delta > dps[j].delta })
+
+	for i, dp := range dps {
+		assert.Equal(t, "offender_metric", dp.metricName,
+			"data point %d: metric_name must be 'offender_metric'", i)
+		assert.Equal(t, expectedKeys[i], dp.labelKey,
+			"data point %d: label_key must be %q", i, expectedKeys[i])
+		assert.Equal(t, expectedDeltas[i], dp.delta,
+			"data point %d: delta must be %d", i, expectedDeltas[i])
+	}
+
+	t.Logf("SUCCESS: Top 3 offenders reported correctly: %v", dps)
 }
