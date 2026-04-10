@@ -127,6 +127,9 @@ processors:
     max_tracker_count: 0                     # Set > 0 to bound memory (0 = unlimited). Rejected pairs emit via telemetry gauge.
     top_offenders_count: 10                  # How many high-growth trackers to report via telemetry gauge
     estimated_cost_per_metric_month: 0.05    # For ROI tracking ($/series/month)
+    metric_overrides:                        # Optional per-metric cardinality limits
+      http.server.request.duration: 5000     # Allow higher headroom for routes
+      db.query.duration: 50                  # Strict limit for DB queries
 
 service:
   pipelines:

@@ -1195,3 +1195,72 @@ func TestMaxTrackerCount_EvictionFreesSlots(t *testing.T) {
 	require.Equal(t, int64(5), p.trackerCount.Load(), "new trackers accepted after eviction")
 	require.Equal(t, int64(5), p.trackersRejected.Load(), "refusals count remains unchanged from before")
 }
+
+// TestMetricOverrides_SpecificLimit verifies that a metric with an override
+// uses its specific limit instead of the global default.
+func TestMetricOverrides_SpecificLimit(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 10,
+		EpochDurationSeconds:        300,
+		MetricOverrides: map[string]int{
+			"http.server.request.duration": 5000,
+		},
+	}
+
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	next := new(consumertest.MetricsSink)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	p := proc.(*cardinalityProcessor)
+
+	// Send 100 unique values to the overridden metric — none should be dropped
+	// because 100 < 5000
+	for i := 0; i < 100; i++ {
+		dropped := p.shouldDrop("http.server.request.duration", "route", fmt.Sprintf("/api/v1/resource/%d", i))
+		require.False(t, dropped, "should not drop within override limit")
+	}
+}
+
+// TestMetricOverrides_FallbackToGlobal verifies that metrics not listed in
+// the override map use the global MaxCardinalityDeltaPerEpoch.
+func TestMetricOverrides_FallbackToGlobal(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 5,
+		EpochDurationSeconds:        300,
+		MetricOverrides: map[string]int{
+			"http.server.request.duration": 5000,
+		},
+	}
+
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	next := new(consumertest.MetricsSink)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	p := proc.(*cardinalityProcessor)
+
+	// Send 20 unique values to a metric NOT in overrides — should drop after 5
+	var dropCount int
+	for i := 0; i < 20; i++ {
+		if p.shouldDrop("db.query.duration", "table_name", fmt.Sprintf("table_%d", i)) {
+			dropCount++
+		}
+	}
+	require.Greater(t, dropCount, 0, "unspecified metric should enforce global limit")
+}
+
+// TestMetricOverrides_Validation verifies that invalid override values
+// are caught during config validation.
+func TestMetricOverrides_Validation(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 500,
+		EpochDurationSeconds:        300,
+		MetricOverrides: map[string]int{
+			"bad_metric": -1,
+		},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "metric_overrides")
+}

@@ -95,6 +95,15 @@ type Config struct {
 	// Set to 0 to disable the limit entirely (allow unlimited growth).
 	// Must be ≥ 0 and ≤ 10,000,000.
 	MaxTrackerCount int `mapstructure:"max_tracker_count"`
+
+	// MetricOverrides allows per-metric cardinality limits that override the
+	// global MaxCardinalityDeltaPerEpoch. This is useful when specific metrics
+	// (e.g. http.server.request.duration) legitimately need higher headroom
+	// than the global default, while keeping the global safety net tight.
+	//
+	// Unspecified metrics fall back to MaxCardinalityDeltaPerEpoch.
+	// Each override value must be > 0.
+	MetricOverrides map[string]int `mapstructure:"metric_overrides"`
 }
 
 // Validate checks that all required Config fields are within their acceptable
@@ -116,6 +125,11 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxTrackerCount < 0 || c.MaxTrackerCount > 10000000 {
 		return fmt.Errorf("max_tracker_count must be between 0 and 10,000,000")
+	}
+	for name, limit := range c.MetricOverrides {
+		if limit <= 0 {
+			return fmt.Errorf("metric_overrides[%q] must be greater than 0", name)
+		}
 	}
 	return nil
 }
