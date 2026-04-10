@@ -124,6 +124,7 @@ processors:
       - http.status_code
       - service.name
     tag_only: false                           # true = observe only, false = enforce
+    max_tracker_count: 0                     # Set > 0 to bound memory (0 = unlimited). Rejected pairs emit via telemetry gauge.
     top_offenders_count: 10                  # How many high-growth trackers to report via telemetry gauge
     estimated_cost_per_metric_month: 0.05    # For ROI tracking ($/series/month)
 
@@ -149,6 +150,7 @@ Once your configuration is ready, run your custom binary:
 |---|---|---|
 | `processor_labels_stripped_total` | Counter | Attributes stripped or tagged per data point. Use `rate()` for spike detection. |
 | `processor_top_offenders` | Gauge | Top N (metric, label) pairs by unique-value growth during the last 5-minute epoch. Attributes: `metric_name`, `label_key`. |
+| `processor_trackers_rejected_total` | Counter | Number of new (metric, label) pairs ignored because `max_tracker_count` limit was reached. |
 | `estimated_savings_dollars_total` | Counter | Dollar value of series prevented from reaching your TSDB. |
 | `processor_trackers_active` | Gauge | Live `(metric, attribute)` trackers across all 256 shards. |
 

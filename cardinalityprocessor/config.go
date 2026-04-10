@@ -86,6 +86,15 @@ type Config struct {
 	// Set to 0 to disable the Top-N gauge entirely.
 	// Must be ≥ 0.
 	TopOffendersCount int `mapstructure:"top_offenders_count"`
+
+	// MaxTrackerCount is the absolute maximum number of concurrent
+	// (metric, label) tracking sketches across all shards.
+	// If this limit is reached, new (metric, label) pairs are silently
+	// ignored and passed through until existing trackers are evicted.
+	//
+	// Set to 0 to disable the limit entirely (allow unlimited growth).
+	// Must be ≥ 0 and ≤ 10,000,000.
+	MaxTrackerCount int `mapstructure:"max_tracker_count"`
 }
 
 // Validate checks that all required Config fields are within their acceptable
@@ -104,6 +113,9 @@ func (c *Config) Validate() error {
 	}
 	if c.TopOffendersCount < 0 || c.TopOffendersCount > 500 {
 		return fmt.Errorf("top_offenders_count must be between 0 and 500")
+	}
+	if c.MaxTrackerCount < 0 || c.MaxTrackerCount > 10000000 {
+		return fmt.Errorf("max_tracker_count must be between 0 and 10,000,000")
 	}
 	return nil
 }

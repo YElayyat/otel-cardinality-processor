@@ -105,6 +105,9 @@ rate(estimated_savings_dollars_total[5m]) * 60 * 60 * 24 * 30
 ### Top-N Offender Extraction
 The `processor_top_offenders` gauge reports the highest-growth `(metric_name, label_key)` pairs during the sliding epoch. This is computed entirely in the background `rotate()` goroutine, ensuring zero impact on the `ConsumeMetrics` hot path. To prevent unbounded memory growth during massive cardinality explosions (e.g. 1 million new active tracking keys), the processor uses a bounded $O(\text{topN})$ min-scan algorithm instead of a full slice sort. This guarantees exactly zero heap allocations beyond the tiny fixed-size buffer.
 
+### Bounded Tracker Count Tracking
+To prevent unbound memory growth against highly malicious or misconfigured inputs, you can optionally configure `max_tracker_count`. Because this operates on the hot path, Cardinality Guardian employs a strict O(1) **rejection-on-full** strategy rather than LRU cache eviction. When the limit is reached, new incoming target pairs are silently ignored (they are not tracked, and therefore their attributes are never dropped). The processor frees up memory dynamically using its built-in background stale tracker eviction cycle, so slots naturally become available again without any hot path performance penalties.
+
 ### Standard Pipeline Metrics
 Alongside Cardinality Guardian's custom metrics, the OpenTelemetry Collector automatically emits standard pipeline telemetry:
 
