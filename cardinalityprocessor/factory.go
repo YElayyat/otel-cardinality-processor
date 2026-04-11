@@ -68,7 +68,6 @@ func createDefaultConfig() component.Config {
 	}
 }
 
-
 // createMetricsProcessor is the constructor wired into the factory by
 // processor.WithMetrics. The Collector calls it once per pipeline that
 // references this component, passing the merged (default + user) configuration

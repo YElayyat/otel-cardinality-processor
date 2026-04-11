@@ -1,23 +1,23 @@
 package cardinalityprocessor
 
 import (
-        "context"
-        "fmt"
-        "sort"
-        "sync"
-        "sync/atomic"
-        "testing"
+	"context"
+	"fmt"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"testing"
 
-        "github.com/stretchr/testify/assert"
-        "github.com/stretchr/testify/require"
-        "go.opentelemetry.io/collector/component"
-        "go.opentelemetry.io/collector/consumer/consumertest"
-        "go.opentelemetry.io/collector/pdata/pmetric"
-        "go.opentelemetry.io/collector/processor/processortest"
-        "go.opentelemetry.io/otel/attribute"
-        sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-        "go.opentelemetry.io/otel/sdk/metric/metricdata"
-        "go.uber.org/goleak"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/consumer/consumertest"
+	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/processor/processortest"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"go.uber.org/goleak"
 )
 
 // TestMain ensures that no goroutines are leaked across the test suite.
@@ -25,140 +25,139 @@ import (
 // canceled in Shutdown(); goleak.VerifyTestMain will fail the test run if
 // any goroutine survives after all tests complete.
 func TestMain(m *testing.M) {
-        goleak.VerifyTestMain(m)
+	goleak.VerifyTestMain(m)
 }
 
-
 func TestCardinalityProcessor_ConsumeMetrics(t *testing.T) {
-        cfg := &Config{
-                MaxCardinalityDeltaPerEpoch: 100,
-                EpochDurationSeconds:        30,
-                NeverDropLabels:             []string{"region", "status_code"},
-        }
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 100,
+		EpochDurationSeconds:        30,
+		NeverDropLabels:             []string{"region", "status_code"},
+	}
 
-        next := new(consumertest.MetricsSink)
+	next := new(consumertest.MetricsSink)
 
-        // Create the mock OTel settings (which includes the mock MeterProvider and Logger)
-        set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	// Create the mock OTel settings (which includes the mock MeterProvider and Logger)
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
 
-        proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
-        require.NoError(t, err)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
 
-        md := pmetric.NewMetrics()
-        rm := md.ResourceMetrics().AppendEmpty()
-        sm := rm.ScopeMetrics().AppendEmpty()
-        m := sm.Metrics().AppendEmpty()
-        m.SetName("http.server.duration")
-        m.SetEmptyGauge()
-        dp := m.Gauge().DataPoints().AppendEmpty()
+	md := pmetric.NewMetrics()
+	rm := md.ResourceMetrics().AppendEmpty()
+	sm := rm.ScopeMetrics().AppendEmpty()
+	m := sm.Metrics().AppendEmpty()
+	m.SetName("http.server.duration")
+	m.SetEmptyGauge()
+	dp := m.Gauge().DataPoints().AppendEmpty()
 
-        attrs := dp.Attributes()
-        attrs.PutStr("region", "us-east-1")     // Protected
-        attrs.PutStr("user_id", "user_123")     // To be intercepted
-        attrs.PutStr("temp_label", "delete_me") // To be intercepted
+	attrs := dp.Attributes()
+	attrs.PutStr("region", "us-east-1")     // Protected
+	attrs.PutStr("user_id", "user_123")     // To be intercepted
+	attrs.PutStr("temp_label", "delete_me") // To be intercepted
 
-        err = proc.ConsumeMetrics(context.Background(), md)
-        assert.NoError(t, err)
+	err = proc.ConsumeMetrics(context.Background(), md)
+	assert.NoError(t, err)
 
-        require.GreaterOrEqual(t, len(next.AllMetrics()), 1, "sink should have received at least one metrics batch")
+	require.GreaterOrEqual(t, len(next.AllMetrics()), 1, "sink should have received at least one metrics batch")
 
-        resultMetrics := next.AllMetrics()[0]
+	resultMetrics := next.AllMetrics()[0]
 
-        require.Equal(t, 1, resultMetrics.ResourceMetrics().Len(), "expected 1 ResourceMetrics")
-        resultRM := resultMetrics.ResourceMetrics().At(0)
+	require.Equal(t, 1, resultMetrics.ResourceMetrics().Len(), "expected 1 ResourceMetrics")
+	resultRM := resultMetrics.ResourceMetrics().At(0)
 
-        require.Equal(t, 1, resultRM.ScopeMetrics().Len(), "expected 1 ScopeMetrics")
-        resultSM := resultRM.ScopeMetrics().At(0)
+	require.Equal(t, 1, resultRM.ScopeMetrics().Len(), "expected 1 ScopeMetrics")
+	resultSM := resultRM.ScopeMetrics().At(0)
 
-        require.Equal(t, 1, resultSM.Metrics().Len(), "expected 1 Metric")
-        resultMetric := resultSM.Metrics().At(0)
+	require.Equal(t, 1, resultSM.Metrics().Len(), "expected 1 Metric")
+	resultMetric := resultSM.Metrics().At(0)
 
-        require.Equal(t, 1, resultMetric.Gauge().DataPoints().Len(), "expected 1 DataPoint")
-        resultAttrs := resultMetric.Gauge().DataPoints().At(0).Attributes()
+	require.Equal(t, 1, resultMetric.Gauge().DataPoints().Len(), "expected 1 DataPoint")
+	resultAttrs := resultMetric.Gauge().DataPoints().At(0).Attributes()
 
-        _, regionExists := resultAttrs.Get("region")
-        assert.True(t, regionExists, "protected label 'region' must survive")
+	_, regionExists := resultAttrs.Get("region")
+	assert.True(t, regionExists, "protected label 'region' must survive")
 
-        assert.Equal(t, 3, resultAttrs.Len(), "Should have all 3 attributes in Phase 1 setup")
+	assert.Equal(t, 3, resultAttrs.Len(), "Should have all 3 attributes in Phase 1 setup")
 }
 
 func TestCardinalityProcessor_HighCardinalityLimit(t *testing.T) {
-        cfg := &Config{
-                MaxCardinalityDeltaPerEpoch: 50,
-                EpochDurationSeconds:        30,
-                NeverDropLabels:             []string{"region"},
-        }
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 50,
+		EpochDurationSeconds:        30,
+		NeverDropLabels:             []string{"region"},
+	}
 
-        next := new(consumertest.MetricsSink)
-        // Create the mock OTel settings (which includes the mock MeterProvider and Logger)
-        set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
-        p, err := newCardinalityProcessor(context.Background(), cfg, set, next)
-        require.NoError(t, err)
+	next := new(consumertest.MetricsSink)
+	// Create the mock OTel settings (which includes the mock MeterProvider and Logger)
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	p, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
 
-        err = p.Start(context.Background(), nil)
-        require.NoError(t, err)
-        defer p.Shutdown(context.Background())
+	err = p.Start(context.Background(), nil)
+	require.NoError(t, err)
+	defer p.Shutdown(context.Background())
 
-        md := pmetric.NewMetrics()
-        rm := md.ResourceMetrics().AppendEmpty()
-        sm := rm.ScopeMetrics().AppendEmpty()
-        m := sm.Metrics().AppendEmpty()
-        m.SetName("http.requests")
-        gauge := m.SetEmptyGauge()
+	md := pmetric.NewMetrics()
+	rm := md.ResourceMetrics().AppendEmpty()
+	sm := rm.ScopeMetrics().AppendEmpty()
+	m := sm.Metrics().AppendEmpty()
+	m.SetName("http.requests")
+	gauge := m.SetEmptyGauge()
 
-        for i := 0; i < 100; i++ {
-                dp := gauge.DataPoints().AppendEmpty()
-                dp.SetIntValue(1)
-                dp.Attributes().PutStr("user_id", fmt.Sprintf("user-%d", i))
-                dp.Attributes().PutStr("region", "us-east")
-        }
+	for i := 0; i < 100; i++ {
+		dp := gauge.DataPoints().AppendEmpty()
+		dp.SetIntValue(1)
+		dp.Attributes().PutStr("user_id", fmt.Sprintf("user-%d", i))
+		dp.Attributes().PutStr("region", "us-east")
+	}
 
-        err = p.ConsumeMetrics(context.Background(), md)
-        require.NoError(t, err)
+	err = p.ConsumeMetrics(context.Background(), md)
+	require.NoError(t, err)
 
-        require.GreaterOrEqual(t, len(next.AllMetrics()), 1, "sink should have received at least one metrics batch")
+	require.GreaterOrEqual(t, len(next.AllMetrics()), 1, "sink should have received at least one metrics batch")
 
-        outMd := next.AllMetrics()[0]
+	outMd := next.AllMetrics()[0]
 
-        require.Equal(t, 1, outMd.ResourceMetrics().Len(), "expected 1 ResourceMetrics")
-        outRM := outMd.ResourceMetrics().At(0)
+	require.Equal(t, 1, outMd.ResourceMetrics().Len(), "expected 1 ResourceMetrics")
+	outRM := outMd.ResourceMetrics().At(0)
 
-        require.Equal(t, 1, outRM.ScopeMetrics().Len(), "expected 1 ScopeMetrics")
-        outSM := outRM.ScopeMetrics().At(0)
+	require.Equal(t, 1, outRM.ScopeMetrics().Len(), "expected 1 ScopeMetrics")
+	outSM := outRM.ScopeMetrics().At(0)
 
-        require.Equal(t, 1, outSM.Metrics().Len(), "expected 1 Metric")
-        outDps := outSM.Metrics().At(0).Gauge().DataPoints()
+	require.Equal(t, 1, outSM.Metrics().Len(), "expected 1 Metric")
+	outDps := outSM.Metrics().At(0).Gauge().DataPoints()
 
-        require.Equal(t, 100, outDps.Len(), "Should still have 100 data points")
+	require.Equal(t, 100, outDps.Len(), "Should still have 100 data points")
 
-        droppedCount := 0
-        keptCount := 0
+	droppedCount := 0
+	keptCount := 0
 
-        for i := 0; i < outDps.Len(); i++ {
-                dp := outDps.At(i)
+	for i := 0; i < outDps.Len(); i++ {
+		dp := outDps.At(i)
 
-                _, hasRegion := dp.Attributes().Get("region")
-                require.True(t, hasRegion, "Protected label 'region' should never be dropped")
+		_, hasRegion := dp.Attributes().Get("region")
+		require.True(t, hasRegion, "Protected label 'region' should never be dropped")
 
-                if _, hasUser := dp.Attributes().Get("user_id"); hasUser {
-                        keptCount++
-                } else {
-                        droppedCount++
-                }
-        }
+		if _, hasUser := dp.Attributes().Get("user_id"); hasUser {
+			keptCount++
+		} else {
+			droppedCount++
+		}
+	}
 
-        // The two-phase estimation strategy (Phase 1: estimate on every insert for
-        // the first 64 calls) means the cardinality check is precise near the limit.
-        // We expect approximately a 50/50 split; ±10 is a generous tolerance that
-        // still catches off-by-a-large-number bugs in the threshold logic.
-        assert.InDelta(t, 50, keptCount, 10,
-                "kept count must be within 10 of the 50-label limit (got %d)", keptCount)
-        assert.InDelta(t, 50, droppedCount, 10,
-                "dropped count must be within 10 of the excess beyond the limit (got %d)", droppedCount)
-        assert.Equal(t, 100, keptCount+droppedCount,
-                "every data point must be accounted for (kept + dropped must equal 100)")
+	// The two-phase estimation strategy (Phase 1: estimate on every insert for
+	// the first 64 calls) means the cardinality check is precise near the limit.
+	// We expect approximately a 50/50 split; ±10 is a generous tolerance that
+	// still catches off-by-a-large-number bugs in the threshold logic.
+	assert.InDelta(t, 50, keptCount, 10,
+		"kept count must be within 10 of the 50-label limit (got %d)", keptCount)
+	assert.InDelta(t, 50, droppedCount, 10,
+		"dropped count must be within 10 of the excess beyond the limit (got %d)", droppedCount)
+	assert.Equal(t, 100, keptCount+droppedCount,
+		"every data point must be accounted for (kept + dropped must equal 100)")
 
-        t.Logf("SUCCESS: Kept %d user_ids, Dropped %d user_ids", keptCount, droppedCount)
+	t.Logf("SUCCESS: Kept %d user_ids, Dropped %d user_ids", keptCount, droppedCount)
 }
 
 // TestShardDistribution verifies that the maphash routing function spreads
@@ -166,60 +165,60 @@ func TestCardinalityProcessor_HighCardinalityLimit(t *testing.T) {
 // An empty shard would indicate a degenerate hash distribution that would
 // concentrate lock contention onto the remaining populated shards.
 func TestShardDistribution(t *testing.T) {
-        cfg := &Config{
-                MaxCardinalityDeltaPerEpoch: 1000,
-                EpochDurationSeconds:        30,
-        }
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 1000,
+		EpochDurationSeconds:        30,
+	}
 
-        // Create the mock OTel settings (which includes the mock MeterProvider and Logger)
-        set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	// Create the mock OTel settings (which includes the mock MeterProvider and Logger)
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
 
-        proc, err := newCardinalityProcessor(context.Background(), cfg, set, new(consumertest.MetricsSink))
-        require.NoError(t, err)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, new(consumertest.MetricsSink))
+	require.NoError(t, err)
 
-        // Type-assert to the concrete type so we can access getShard directly.
-        // This is valid because we are inside the same package (package cardinalityprocessor).
-        p := proc.(*cardinalityProcessor)
+	// Type-assert to the concrete type so we can access getShard directly.
+	// This is valid because we are inside the same package (package cardinalityprocessor).
+	p := proc.(*cardinalityProcessor)
 
-        const totalMetrics = 10_000
-        hitCount := make([]int, numShards)
+	const totalMetrics = 10_000
+	hitCount := make([]int, numShards)
 
-        for i := 0; i < totalMetrics; i++ {
-                shard := p.getShard(fmt.Sprintf("metric_%d", i))
+	for i := 0; i < totalMetrics; i++ {
+		shard := p.getShard(fmt.Sprintf("metric_%d", i))
 
-                // Identify which shard index was returned by comparing pointers.
-                for idx, s := range p.shards {
-                        if s == shard {
-                                hitCount[idx]++
-                                break
-                        }
-                }
-        }
+		// Identify which shard index was returned by comparing pointers.
+		for idx, s := range p.shards {
+			if s == shard {
+				hitCount[idx]++
+				break
+			}
+		}
+	}
 
-        emptyShards := 0
-        for idx, count := range hitCount {
-                if count == 0 {
-                        t.Logf("Shard %d received 0 metrics", idx)
-                        emptyShards++
-                }
-        }
+	emptyShards := 0
+	for idx, count := range hitCount {
+		if count == 0 {
+			t.Logf("Shard %d received 0 metrics", idx)
+			emptyShards++
+		}
+	}
 
-        assert.Equal(t, 0, emptyShards,
-                "Every shard must receive at least one metric across 10,000 unique names; "+
-                        "%d shard(s) were empty", emptyShards)
+	assert.Equal(t, 0, emptyShards,
+		"Every shard must receive at least one metric across 10,000 unique names; "+
+			"%d shard(s) were empty", emptyShards)
 
-        // Log distribution stats for manual inspection.
-        min, max := hitCount[0], hitCount[0]
-        for _, c := range hitCount {
-                if c < min {
-                        min = c
-                }
-                if c > max {
-                        max = c
-                }
-        }
-        t.Logf("Shard distribution across %d metrics: min=%d, max=%d, expected≈%d",
-                totalMetrics, min, max, totalMetrics/numShards)
+	// Log distribution stats for manual inspection.
+	min, max := hitCount[0], hitCount[0]
+	for _, c := range hitCount {
+		if c < min {
+			min = c
+		}
+		if c > max {
+			max = c
+		}
+	}
+	t.Logf("Shard distribution across %d metrics: min=%d, max=%d, expected≈%d",
+		totalMetrics, min, max, totalMetrics/numShards)
 }
 
 // TestConcurrency_Sharded verifies that 100 goroutines can call shouldDrop
@@ -227,41 +226,41 @@ func TestShardDistribution(t *testing.T) {
 // Each goroutine uses a distinct value space so that high-cardinality pressure
 // is applied from multiple directions simultaneously.
 func TestConcurrency_Sharded(t *testing.T) {
-        cfg := &Config{
-                MaxCardinalityDeltaPerEpoch: 500,
-                EpochDurationSeconds:        30,
-        }
-        // Create the mock OTel settings (which includes the mock MeterProvider and Logger)
-        set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 500,
+		EpochDurationSeconds:        30,
+	}
+	// Create the mock OTel settings (which includes the mock MeterProvider and Logger)
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
 
-        proc, err := newCardinalityProcessor(context.Background(), cfg, set, new(consumertest.MetricsSink))
-        require.NoError(t, err)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, new(consumertest.MetricsSink))
+	require.NoError(t, err)
 
-        p := proc.(*cardinalityProcessor)
+	p := proc.(*cardinalityProcessor)
 
-        const (
-                goroutines = 50
-                iterations = 200
-        )
+	const (
+		goroutines = 50
+		iterations = 200
+	)
 
-        var wg sync.WaitGroup
-        wg.Add(goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
 
-        for id := 0; id < goroutines; id++ {
-                id := id // capture loop variable
-                go func() {
-                        defer wg.Done()
-                        for i := 0; i < iterations; i++ {
-                                // Each goroutine produces a unique value space to exercise
-                                // concurrent tracker creation and the double-check lock path.
-                                val := fmt.Sprintf("value_%d_%d", id, i)
-                                p.shouldDrop("concurrent_metric", "key", val)
-                        }
-                }()
-        }
+	for id := 0; id < goroutines; id++ {
+		id := id // capture loop variable
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				// Each goroutine produces a unique value space to exercise
+				// concurrent tracker creation and the double-check lock path.
+				val := fmt.Sprintf("value_%d_%d", id, i)
+				p.shouldDrop("concurrent_metric", "key", val)
+			}
+		}()
+	}
 
-        wg.Wait()
-        // If we reach here without a deadlock, race condition, or panic, the test passes.
+	wg.Wait()
+	// If we reach here without a deadlock, race condition, or panic, the test passes.
 }
 
 // BenchmarkShouldDrop_HighThroughput measures the per-operation cost of the
@@ -279,43 +278,43 @@ func TestConcurrency_Sharded(t *testing.T) {
 //
 // Run with: go test -bench=BenchmarkShouldDrop_HighThroughput -benchmem ./cardinalityprocessor/.
 func BenchmarkShouldDrop_HighThroughput(b *testing.B) {
-        cfg := &Config{
-                MaxCardinalityDeltaPerEpoch: 10_000,
-                EpochDurationSeconds:        300,
-        }
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 10_000,
+		EpochDurationSeconds:        300,
+	}
 
-        // Create the mock OTel settings (which includes the mock MeterProvider and Logger)
-        set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
-        proc, err := newCardinalityProcessor(context.Background(), cfg, set, new(consumertest.MetricsSink))
-        if err != nil {
-                b.Fatal(err)
-        }
+	// Create the mock OTel settings (which includes the mock MeterProvider and Logger)
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, new(consumertest.MetricsSink))
+	if err != nil {
+		b.Fatal(err)
+	}
 
-        p := proc.(*cardinalityProcessor)
+	p := proc.(*cardinalityProcessor)
 
-        // Pre-warm 64 unique trackers (well above any realistic GOMAXPROCS value).
-        // Each goroutine in RunParallel will claim one of these keys so that all
-        // trackers exist before the timed loop begins.
-        const numKeys = 64
-        keys := make([]string, numKeys)
-        for i := range keys {
-                keys[i] = fmt.Sprintf("bench_key_%d", i)
-                p.shouldDrop("bench_metric", keys[i], "bench_val")
-        }
+	// Pre-warm 64 unique trackers (well above any realistic GOMAXPROCS value).
+	// Each goroutine in RunParallel will claim one of these keys so that all
+	// trackers exist before the timed loop begins.
+	const numKeys = 64
+	keys := make([]string, numKeys)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("bench_key_%d", i)
+		p.shouldDrop("bench_metric", keys[i], "bench_val")
+	}
 
-        b.ReportAllocs()
-        b.ResetTimer()
+	b.ReportAllocs()
+	b.ResetTimer()
 
-        // Each goroutine picks its own slot from the pre-warmed key array.
-        // The assignment is done once per goroutine, outside the pb.Next() loop,
-        // so the fmt.Sprintf and atomic.Add are not included in the per-op cost.
-        var counter atomic.Int64
-        b.RunParallel(func(pb *testing.PB) {
-                key := keys[int(counter.Add(1))%numKeys]
-                for pb.Next() {
-                        p.shouldDrop("bench_metric", key, "bench_val")
-                }
-        })
+	// Each goroutine picks its own slot from the pre-warmed key array.
+	// The assignment is done once per goroutine, outside the pb.Next() loop,
+	// so the fmt.Sprintf and atomic.Add are not included in the per-op cost.
+	var counter atomic.Int64
+	b.RunParallel(func(pb *testing.PB) {
+		key := keys[int(counter.Add(1))%numKeys]
+		for pb.Next() {
+			p.shouldDrop("bench_metric", key, "bench_val")
+		}
+	})
 }
 
 // BenchmarkConsumeMetrics_Passthrough measures the full ConsumeMetrics pipeline
@@ -499,60 +498,60 @@ func BenchmarkConsumeMetrics_LargeBatch(b *testing.B) {
 }
 
 func TestCardinalityProcessor_TagOnlyMode(t *testing.T) {
-        cfg := &Config{
-                MaxCardinalityDeltaPerEpoch: 50,
-                EpochDurationSeconds:        300,
-                TagOnly:                     true, // Enable Dual-Route Tagging
-        }
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 50,
+		EpochDurationSeconds:        300,
+		TagOnly:                     true, // Enable Dual-Route Tagging
+	}
 
-        next := new(consumertest.MetricsSink)
-        set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
-        proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
-        require.NoError(t, err)
+	next := new(consumertest.MetricsSink)
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
 
-        // Fire 100 metrics with unique user_ids
-        for i := 0; i < 100; i++ {
-                md := pmetric.NewMetrics()
-                rm := md.ResourceMetrics().AppendEmpty()
-                sm := rm.ScopeMetrics().AppendEmpty()
-                m := sm.Metrics().AppendEmpty()
-                m.SetName("api.request")
-                m.SetEmptyGauge()
-                dp := m.Gauge().DataPoints().AppendEmpty()
+	// Fire 100 metrics with unique user_ids
+	for i := 0; i < 100; i++ {
+		md := pmetric.NewMetrics()
+		rm := md.ResourceMetrics().AppendEmpty()
+		sm := rm.ScopeMetrics().AppendEmpty()
+		m := sm.Metrics().AppendEmpty()
+		m.SetName("api.request")
+		m.SetEmptyGauge()
+		dp := m.Gauge().DataPoints().AppendEmpty()
 
-                dp.Attributes().PutStr("user_id", fmt.Sprintf("user_%d", i))
+		dp.Attributes().PutStr("user_id", fmt.Sprintf("user_%d", i))
 
-                err = proc.ConsumeMetrics(context.Background(), md)
-                require.NoError(t, err)
-        }
+		err = proc.ConsumeMetrics(context.Background(), md)
+		require.NoError(t, err)
+	}
 
-        outMetrics := next.AllMetrics()
-        require.Len(t, outMetrics, 100)
+	outMetrics := next.AllMetrics()
+	require.Len(t, outMetrics, 100)
 
-        taggedCount := 0
-        droppedCount := 0
+	taggedCount := 0
+	droppedCount := 0
 
-        // Inspect the resulting metrics
-        for _, md := range outMetrics {
-                attrs := md.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0).Gauge().DataPoints().At(0).Attributes()
+	// Inspect the resulting metrics
+	for _, md := range outMetrics {
+		attrs := md.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0).Gauge().DataPoints().At(0).Attributes()
 
-                // 1. Verify the attribute was NEVER dropped
-                if _, hasUserID := attrs.Get("user_id"); !hasUserID {
-                        droppedCount++
-                }
+		// 1. Verify the attribute was NEVER dropped
+		if _, hasUserID := attrs.Get("user_id"); !hasUserID {
+			droppedCount++
+		}
 
-                // 2. Count how many got the special routing tag
-                if _, hasTag := attrs.Get("otel.metric.overflow"); hasTag {
-                        taggedCount++
-                }
-        }
+		// 2. Count how many got the special routing tag
+		if _, hasTag := attrs.Get("otel.metric.overflow"); hasTag {
+			taggedCount++
+		}
+	}
 
-        // Assertions
-        assert.Equal(t, 0, droppedCount, "0 attributes should be dropped in TagOnly mode")
-        assert.Greater(t, taggedCount, 0, "Some attributes should have been tagged for routing")
-        assert.Less(t, taggedCount, 100, "Not all attributes should be tagged (first 50 are allowed)")
+	// Assertions
+	assert.Equal(t, 0, droppedCount, "0 attributes should be dropped in TagOnly mode")
+	assert.Greater(t, taggedCount, 0, "Some attributes should have been tagged for routing")
+	assert.Less(t, taggedCount, 100, "Not all attributes should be tagged (first 50 are allowed)")
 
-        t.Logf("SUCCESS: Kept all 100 user_ids. Tagged %d user_ids for cold storage.", taggedCount)
+	t.Logf("SUCCESS: Kept all 100 user_ids. Tagged %d user_ids for cold storage.", taggedCount)
 }
 
 // TestInternalTelemetry wires the processor to a real OTel SDK ManualReader so
@@ -568,160 +567,160 @@ func TestCardinalityProcessor_TagOnlyMode(t *testing.T) {
 // has 6 unique values. The 6th insertion produces a delta of 6 > 5, which
 // triggers exactly one drop: one attribute strip and one savings increment.
 func TestInternalTelemetry(t *testing.T) {
-        const (
-                costPerMetric    = 0.10
-                cardinalityLimit = 5
-        )
+	const (
+		costPerMetric    = 0.10
+		cardinalityLimit = 5
+	)
 
-        cfg := &Config{
-                MaxCardinalityDeltaPerEpoch: cardinalityLimit,
-                EpochDurationSeconds:        300,
-                EstimatedCostPerMetricMonth: costPerMetric,
-        }
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: cardinalityLimit,
+		EpochDurationSeconds:        300,
+		EstimatedCostPerMetricMonth: costPerMetric,
+	}
 
-        // ManualReader captures all SDK metric data on demand via Collect().
-        // NewMeterProvider registers it as the single export pipeline.
-        reader := sdkmetric.NewManualReader()
-        sdkProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-        defer func() {
-                if err := sdkProvider.Shutdown(context.Background()); err != nil {
-                        t.Errorf("sdk provider shutdown: %v", err)
-                }
-        }()
+	// ManualReader captures all SDK metric data on demand via Collect().
+	// NewMeterProvider registers it as the single export pipeline.
+	reader := sdkmetric.NewManualReader()
+	sdkProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() {
+		if err := sdkProvider.Shutdown(context.Background()); err != nil {
+			t.Errorf("sdk provider shutdown: %v", err)
+		}
+	}()
 
-        // Replace the nop MeterProvider with the real SDK provider so the
-        // processor registers its instruments against our ManualReader.
-        set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
-        set.TelemetrySettings.MeterProvider = sdkProvider
+	// Replace the nop MeterProvider with the real SDK provider so the
+	// processor registers its instruments against our ManualReader.
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	set.TelemetrySettings.MeterProvider = sdkProvider
 
-        next := new(consumertest.MetricsSink)
-        proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
-        require.NoError(t, err)
+	next := new(consumertest.MetricsSink)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
 
-        // --- Phase 1: create exactly 5 trackers, 0 drops --------------------------
-        //
-        // Each data point carries one label key (key_0 through key_4) with the
-        // shared value "v0". The trackerKey is (metricName, attrKey), so 5 unique
-        // attrKeys create 5 independent trackers. Each tracker records 1 unique
-        // value, well below the limit of 5, so shouldDrop returns false for all.
-        batch1 := pmetric.NewMetrics()
-        rm1 := batch1.ResourceMetrics().AppendEmpty()
-        sm1 := rm1.ScopeMetrics().AppendEmpty()
-        m1 := sm1.Metrics().AppendEmpty()
-        m1.SetName("telemetry_test_metric")
-        m1.SetEmptyGauge()
+	// --- Phase 1: create exactly 5 trackers, 0 drops --------------------------
+	//
+	// Each data point carries one label key (key_0 through key_4) with the
+	// shared value "v0". The trackerKey is (metricName, attrKey), so 5 unique
+	// attrKeys create 5 independent trackers. Each tracker records 1 unique
+	// value, well below the limit of 5, so shouldDrop returns false for all.
+	batch1 := pmetric.NewMetrics()
+	rm1 := batch1.ResourceMetrics().AppendEmpty()
+	sm1 := rm1.ScopeMetrics().AppendEmpty()
+	m1 := sm1.Metrics().AppendEmpty()
+	m1.SetName("telemetry_test_metric")
+	m1.SetEmptyGauge()
 
-        for i := 0; i < 5; i++ {
-                dp := m1.Gauge().DataPoints().AppendEmpty()
-                dp.Attributes().PutStr(fmt.Sprintf("key_%d", i), "v0")
-        }
+	for i := 0; i < 5; i++ {
+		dp := m1.Gauge().DataPoints().AppendEmpty()
+		dp.Attributes().PutStr(fmt.Sprintf("key_%d", i), "v0")
+	}
 
-        err = proc.ConsumeMetrics(context.Background(), batch1)
-        require.NoError(t, err)
+	err = proc.ConsumeMetrics(context.Background(), batch1)
+	require.NoError(t, err)
 
-        // --- Phase 2: exceed the limit on key_0, triggering exactly 1 drop --------
-        //
-        // Values v1-v5 are new for key_0. After inserting v5 the sketch estimate
-        // reaches 6 (v0 from Phase 1 + v1-v5 here). Delta = 6 > 5 → drop.
-        // The attribute is removed from the data point, labelsStripped increments
-        // by 1, and estimatedSavings increments by costPerMetric.
-        batch2 := pmetric.NewMetrics()
-        rm2 := batch2.ResourceMetrics().AppendEmpty()
-        sm2 := rm2.ScopeMetrics().AppendEmpty()
-        m2 := sm2.Metrics().AppendEmpty()
-        m2.SetName("telemetry_test_metric")
-        m2.SetEmptyGauge()
+	// --- Phase 2: exceed the limit on key_0, triggering exactly 1 drop --------
+	//
+	// Values v1-v5 are new for key_0. After inserting v5 the sketch estimate
+	// reaches 6 (v0 from Phase 1 + v1-v5 here). Delta = 6 > 5 → drop.
+	// The attribute is removed from the data point, labelsStripped increments
+	// by 1, and estimatedSavings increments by costPerMetric.
+	batch2 := pmetric.NewMetrics()
+	rm2 := batch2.ResourceMetrics().AppendEmpty()
+	sm2 := rm2.ScopeMetrics().AppendEmpty()
+	m2 := sm2.Metrics().AppendEmpty()
+	m2.SetName("telemetry_test_metric")
+	m2.SetEmptyGauge()
 
-        for i := 1; i <= 5; i++ {
-                dp := m2.Gauge().DataPoints().AppendEmpty()
-                dp.Attributes().PutStr("key_0", fmt.Sprintf("v%d", i))
-        }
+	for i := 1; i <= 5; i++ {
+		dp := m2.Gauge().DataPoints().AppendEmpty()
+		dp.Attributes().PutStr("key_0", fmt.Sprintf("v%d", i))
+	}
 
-        err = proc.ConsumeMetrics(context.Background(), batch2)
-        require.NoError(t, err)
+	err = proc.ConsumeMetrics(context.Background(), batch2)
+	require.NoError(t, err)
 
-        // --- Collect: snapshot all SDK metrics at this exact instant ---------------
-        var collected metricdata.ResourceMetrics
-        err = reader.Collect(context.Background(), &collected)
-        require.NoError(t, err)
+	// --- Collect: snapshot all SDK metrics at this exact instant ---------------
+	var collected metricdata.ResourceMetrics
+	err = reader.Collect(context.Background(), &collected)
+	require.NoError(t, err)
 
-        // --- Assert: processor_trackers_active = 5 ---------------------------------
-        //
-        // The observable gauge callback sums len(shard.trackers) across all 256
-        // shards when Collect() fires. Exactly 5 trackers were created in Phase 1
-        // and no new trackers were added in Phase 2 (key_0 already existed).
-        activeMetric := findMetricByName(t, collected, "processor_trackers_active")
-        gaugeData, ok := activeMetric.Data.(metricdata.Gauge[int64])
-        require.True(t, ok, "processor_trackers_active must be a Gauge[int64]")
+	// --- Assert: processor_trackers_active = 5 ---------------------------------
+	//
+	// The observable gauge callback sums len(shard.trackers) across all 256
+	// shards when Collect() fires. Exactly 5 trackers were created in Phase 1
+	// and no new trackers were added in Phase 2 (key_0 already existed).
+	activeMetric := findMetricByName(t, collected, "processor_trackers_active")
+	gaugeData, ok := activeMetric.Data.(metricdata.Gauge[int64])
+	require.True(t, ok, "processor_trackers_active must be a Gauge[int64]")
 
-        var totalActive int64
-        for _, dp := range gaugeData.DataPoints {
-                totalActive += dp.Value
-        }
-        assert.Equal(t, int64(5), totalActive,
-                "processor_trackers_active must report exactly 5 (one per unique label key)")
+	var totalActive int64
+	for _, dp := range gaugeData.DataPoints {
+		totalActive += dp.Value
+	}
+	assert.Equal(t, int64(5), totalActive,
+		"processor_trackers_active must report exactly 5 (one per unique label key)")
 
-        // --- Assert: processor_labels_stripped_total = 1 ---------------------------
-        //
-        // Only the insertion of v5 into key_0's tracker produced a delta > limit.
-        // Every earlier insertion was within bounds.
-        strippedMetric := findMetricByName(t, collected, "processor_labels_stripped_total")
-        strippedSum, ok := strippedMetric.Data.(metricdata.Sum[int64])
-        require.True(t, ok, "processor_labels_stripped_total must be a Sum[int64]")
+	// --- Assert: processor_labels_stripped_total = 1 ---------------------------
+	//
+	// Only the insertion of v5 into key_0's tracker produced a delta > limit.
+	// Every earlier insertion was within bounds.
+	strippedMetric := findMetricByName(t, collected, "processor_labels_stripped_total")
+	strippedSum, ok := strippedMetric.Data.(metricdata.Sum[int64])
+	require.True(t, ok, "processor_labels_stripped_total must be a Sum[int64]")
 
-        var totalStripped int64
-        for _, dp := range strippedSum.DataPoints {
-                totalStripped += dp.Value
-        }
-        assert.Equal(t, int64(1), totalStripped,
-                "processor_labels_stripped_total must be 1 (only the 6th unique value for key_0 was dropped)")
+	var totalStripped int64
+	for _, dp := range strippedSum.DataPoints {
+		totalStripped += dp.Value
+	}
+	assert.Equal(t, int64(1), totalStripped,
+		"processor_labels_stripped_total must be 1 (only the 6th unique value for key_0 was dropped)")
 
-        // --- Assert: estimated_savings_dollars_total = costPerMetric ---------------
-        //
-        // One drop × EstimatedCostPerMetricMonth = $0.10.
-        savingsMetric := findMetricByName(t, collected, "estimated_savings_dollars_total")
-        savingsSum, ok := savingsMetric.Data.(metricdata.Sum[float64])
-        require.True(t, ok, "estimated_savings_dollars_total must be a Sum[float64]")
+	// --- Assert: estimated_savings_dollars_total = costPerMetric ---------------
+	//
+	// One drop × EstimatedCostPerMetricMonth = $0.10.
+	savingsMetric := findMetricByName(t, collected, "estimated_savings_dollars_total")
+	savingsSum, ok := savingsMetric.Data.(metricdata.Sum[float64])
+	require.True(t, ok, "estimated_savings_dollars_total must be a Sum[float64]")
 
-        var totalSavings float64
-        for _, dp := range savingsSum.DataPoints {
-                totalSavings += dp.Value
-        }
-        assert.InDelta(t, costPerMetric, totalSavings, 1e-9,
-                "estimated_savings_dollars_total must equal %v (1 drop × cost-per-metric)", costPerMetric)
+	var totalSavings float64
+	for _, dp := range savingsSum.DataPoints {
+		totalSavings += dp.Value
+	}
+	assert.InDelta(t, costPerMetric, totalSavings, 1e-9,
+		"estimated_savings_dollars_total must equal %v (1 drop × cost-per-metric)", costPerMetric)
 }
 
 // findMetricByName searches a collected ResourceMetrics snapshot for a metric
 // with the given name. It fails the test immediately if the metric is absent,
 // printing all available metric names to aid diagnosis.
 func findMetricByName(t *testing.T, rm metricdata.ResourceMetrics, name string) metricdata.Metrics {
-        t.Helper()
+	t.Helper()
 
-        for _, sm := range rm.ScopeMetrics {
-                for _, m := range sm.Metrics {
-                        if m.Name == name {
-                                return m
-                        }
-                }
-        }
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name == name {
+				return m
+			}
+		}
+	}
 
-        t.Fatalf("metric %q not found in collected telemetry; available: %v",
-                name, allMetricNames(rm))
+	t.Fatalf("metric %q not found in collected telemetry; available: %v",
+		name, allMetricNames(rm))
 
-        return metricdata.Metrics{}
+	return metricdata.Metrics{}
 }
 
 // allMetricNames returns the names of every metric present in a collected
 // ResourceMetrics snapshot. Used exclusively in test failure messages.
 func allMetricNames(rm metricdata.ResourceMetrics) []string {
-        var names []string
-        for _, sm := range rm.ScopeMetrics {
-                for _, m := range sm.Metrics {
-                        names = append(names, m.Name)
-                }
-        }
+	var names []string
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			names = append(names, m.Name)
+		}
+	}
 
-        return names
+	return names
 }
 
 func TestCardinalityProcessor_AlternateMetricTypes(t *testing.T) {
@@ -783,12 +782,12 @@ func TestCardinalityProcessor_EpochRotation(t *testing.T) {
 
 	// Insert data to initialize a sketch
 	p.shouldDrop("metric", "key", "val")
-	
+
 	shard := p.getShard("metric")
 	shard.mu.RLock()
 	tracker := shard.trackers[trackerKey{metricName: "metric", attrKey: "key"}]
 	shard.mu.RUnlock()
-	
+
 	require.NotNil(t, tracker)
 	require.NotNil(t, tracker.current)
 
