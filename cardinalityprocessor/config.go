@@ -104,6 +104,15 @@ type Config struct {
 	// Unspecified metrics fall back to MaxCardinalityDeltaPerEpoch.
 	// Each override value must be > 0.
 	MetricOverrides map[string]int `mapstructure:"metric_overrides"`
+
+	// DropLogMaxPerEpoch caps the number of "Dropping high-cardinality
+	// attribute" Warn logs emitted per epoch. After this many warnings,
+	// further drops are silently counted and a single summary line is
+	// emitted at the next epoch rotation.
+	//
+	// Set to 0 to disable the cap (log every drop — not recommended at scale).
+	// Must be ≥ 0.
+	DropLogMaxPerEpoch int `mapstructure:"drop_log_max_per_epoch"`
 }
 
 // Validate checks that all required Config fields are within their acceptable
@@ -133,6 +142,9 @@ func (c *Config) Validate() error {
 		if limit <= 0 {
 			return fmt.Errorf("metric_overrides[%q] must be greater than 0", name)
 		}
+	}
+	if c.DropLogMaxPerEpoch < 0 {
+		return fmt.Errorf("drop_log_max_per_epoch must be >= 0")
 	}
 	return nil
 }

@@ -380,6 +380,10 @@ type cardinalityProcessor struct {
 	trackersRejected atomic.Int64
 	// rejectionWarned ensures we only print the limit warning once per epoch.
 	rejectionWarned atomic.Bool
+	// dropLogCount tracks how many enforcement Warn logs have been emitted this epoch.
+	dropLogCount atomic.Int64
+	// dropsThisEpoch tracks total drops this epoch for the suppression summary.
+	dropsThisEpoch atomic.Int64
 
 	// gaugeRegistration holds the handle returned by meter.RegisterCallback so
 	// the callback can be cleanly unregistered in Shutdown(). This is critical
@@ -659,9 +663,12 @@ func (p *cardinalityProcessor) handleAttributes(metricName string, attrs pcommon
 			}
 
 			// NORMAL MODE: log and signal RemoveIf to delete this attribute.
-			p.logger.Warn("Dropping high-cardinality attribute",
-				zap.String("metric", metricName),
-				zap.String("key", k))
+			p.dropsThisEpoch.Add(1)
+			if maxLog := p.config.DropLogMaxPerEpoch; maxLog == 0 || p.dropLogCount.Add(1) <= int64(maxLog) {
+				p.logger.Warn("Dropping high-cardinality attribute",
+					zap.String("metric", metricName),
+					zap.String("key", k))
+			}
 			return true
 		}
 		return false
@@ -759,6 +766,16 @@ func (p *cardinalityProcessor) rotate() {
 
 	// Reset the warning flag so we can log again next epoch if still bounded
 	p.rejectionWarned.Store(false)
+
+	// Emit suppression summary and reset drop log counters for the new epoch
+	totalDrops := p.dropsThisEpoch.Swap(0)
+	logged := p.dropLogCount.Swap(0)
+	suppressed := totalDrops - logged
+	if suppressed > 0 {
+		p.logger.Info("Suppressed drop log entries this epoch",
+			zap.Int64("suppressed", suppressed),
+			zap.Int64("total_drops", totalDrops))
+	}
 
 	p.publishTopOffenders(topBuf)
 }

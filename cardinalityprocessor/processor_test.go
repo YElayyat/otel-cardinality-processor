@@ -18,6 +18,8 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/goleak"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // TestMain ensures that no goroutines are leaked across the test suite.
@@ -1262,4 +1264,102 @@ func TestMetricOverrides_Validation(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "metric_overrides")
+}
+
+// TestDropLogSampling_LimitEnforced verifies that only DropLogMaxPerEpoch
+// enforcement warnings are emitted, and the rest are suppressed.
+func TestDropLogSampling_LimitEnforced(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 5,
+		EpochDurationSeconds:        300,
+		DropLogMaxPerEpoch:          3,
+	}
+
+	core, logs := observer.New(zap.WarnLevel)
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	next := new(consumertest.MetricsSink)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	p := proc.(*cardinalityProcessor)
+	p.logger = zap.New(core)
+
+	// Send 50 unique attribute values through handleAttributes
+	// After 5 unique values, shouldDrop returns true and drops start logging
+	for i := 0; i < 50; i++ {
+		attrs := pmetric.NewMetrics().ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics().AppendEmpty().SetEmptyGauge().DataPoints().AppendEmpty().Attributes()
+		attrs.PutStr("label_key", fmt.Sprintf("value_%d", i))
+		p.handleAttributes("test.metric", attrs)
+	}
+
+	warnCount := logs.FilterMessage("Dropping high-cardinality attribute").Len()
+	require.Equal(t, 3, warnCount, "should only log DropLogMaxPerEpoch warnings")
+	require.Greater(t, p.dropsThisEpoch.Load(), int64(3), "total drops should exceed the log cap")
+}
+
+// TestDropLogSampling_Disabled verifies that setting DropLogMaxPerEpoch=0
+// disables the cap, logging every enforcement event.
+func TestDropLogSampling_Disabled(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 5,
+		EpochDurationSeconds:        300,
+		DropLogMaxPerEpoch:          0, // disabled — log everything
+	}
+
+	core, logs := observer.New(zap.WarnLevel)
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	next := new(consumertest.MetricsSink)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	p := proc.(*cardinalityProcessor)
+	p.logger = zap.New(core)
+
+	for i := 0; i < 30; i++ {
+		attrs := pmetric.NewMetrics().ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics().AppendEmpty().SetEmptyGauge().DataPoints().AppendEmpty().Attributes()
+		attrs.PutStr("label_key", fmt.Sprintf("value_%d", i))
+		p.handleAttributes("test.metric", attrs)
+	}
+
+	warnCount := logs.FilterMessage("Dropping high-cardinality attribute").Len()
+	require.Greater(t, warnCount, 3, "with cap disabled, should log more than 3 warnings")
+}
+
+// TestDropLogSampling_ResetOnRotate verifies that the drop log counter
+// resets after epoch rotation, allowing fresh logs in the new epoch.
+func TestDropLogSampling_ResetOnRotate(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 5,
+		EpochDurationSeconds:        300,
+		DropLogMaxPerEpoch:          2,
+	}
+
+	core, logs := observer.New(zap.WarnLevel)
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	next := new(consumertest.MetricsSink)
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	p := proc.(*cardinalityProcessor)
+	p.logger = zap.New(core)
+
+	// Fill epoch 1 — only 2 logs emitted
+	for i := 0; i < 20; i++ {
+		attrs := pmetric.NewMetrics().ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics().AppendEmpty().SetEmptyGauge().DataPoints().AppendEmpty().Attributes()
+		attrs.PutStr("label_key", fmt.Sprintf("value_%d", i))
+		p.handleAttributes("test.metric", attrs)
+	}
+	require.Equal(t, 2, logs.FilterMessage("Dropping high-cardinality attribute").Len())
+
+	// Rotate epoch — counters should reset
+	p.rotate()
+
+	// Fill epoch 2 — must re-send baseline (0-19) plus new values (20-39)
+	// so the HLL accurately calculates the delta growth over the baseline.
+	for i := 0; i < 40; i++ {
+		attrs := pmetric.NewMetrics().ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics().AppendEmpty().SetEmptyGauge().DataPoints().AppendEmpty().Attributes()
+		attrs.PutStr("label_key", fmt.Sprintf("value_%d", i))
+		p.handleAttributes("test.metric", attrs)
+	}
+	require.Equal(t, 4, logs.FilterMessage("Dropping high-cardinality attribute").Len(), "should have 2 logs from each epoch")
 }
