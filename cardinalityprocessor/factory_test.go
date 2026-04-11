@@ -20,7 +20,7 @@ func TestNewFactory(t *testing.T) {
 func TestCreateDefaultConfig(t *testing.T) {
 	cfg := createDefaultConfig()
 	assert.NotNil(t, cfg)
-	
+
 	// Ensure cast to Config works and validates cleanly
 	oCfg, ok := cfg.(*Config)
 	require.True(t, ok)
