@@ -16,6 +16,11 @@ processors:
       - service.name
     tag_only: false
     estimated_cost_per_metric_month: 0.05
+    top_offenders_count: 10
+    max_tracker_count: 0
+    metric_overrides:
+      http.server.request.duration: 5000
+      db.query.duration: 50
 
 exporters:
   debug:
