@@ -9,58 +9,131 @@
 [![Status](https://img.shields.io/badge/Status-Development-yellow)](./CONTRIBUTING.md)
 [![Benchmarks](https://img.shields.io/badge/Benchmarks-~91ns%2Fop%20|%20827K%20metrics%2Fs-brightgreen)](./BENCHMARKS.md)
 
-An OpenTelemetry Collector processor that enforces per-metric, per-attribute cardinality limits using HyperLogLog++ sketches. It stops cardinality explosions from reaching expensive time-series databases — before the bill does.
+An OpenTelemetry Collector processor that catches metric cardinality explosions before they reach your TSDB.
 
----
+It strips only the exploding label — not the entire data point. Your dashboards keep working.
 
-## The Problem
+```yaml
+processors:
+  cardinality_guardian:
+    max_cardinality_delta_per_epoch: 500
+    epoch_duration_seconds: 300
+    tag_only: true
+```
 
-It only takes one bad deployment. A bug accidentally logs raw database exceptions into the `error.type` attribute instead of a clean string:
+## What it does
 
-* ✅ **Expected:** `error.type = "db_timeout"`
-* 💥 **The Bug:** `error.type = "Lock wait timeout exceeded; txn_id=8f7d6a5b..."`
+A developer pushes code that logs raw exception strings into `error.type`. Yesterday that label had 5 unique values. Today it has 50,000 and climbing. Your Datadog bill noticed before you did.
 
-Because every transaction ID is unique, your timeseries count skyrockets from 5 to 50,000 overnight. Your Datadog bill spikes 1.5x.
-
-Cardinality Guardian catches this surgically — it strips only the exploding `error.type` attribute while leaving your other dimensions (`api`, `region`, `status_code`) completely untouched. Your dashboards stay alive, your on-call stays asleep.
-
----
-
-## How It Works
-
-The processor limits cardinality at the **attribute level**, not the metric level. It creates a separate HyperLogLog++ sketch for every `(metric_name, attribute_key)` pair and enforces limits on the *delta* (new unique values per epoch), not the absolute count.
-
-> **Hot path:** Metric arrives → hash metric name → pick 1 of 256 shards → hash the attribute value on-stack (0 allocs) → insert into HLL sketch → enforce if over limit → unlock.
-
-**Result:** ~48 ns/op, 0 allocs/op at 1M+ data points per second. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design rationale.
-
----
-
-## Operation Modes
-
-### Enforcement Mode (default)
-
-Attributes that breach the cardinality limit are stripped from the data point before export. The metric itself is preserved.
+This processor sits in your OTel pipeline and detects labels with abnormal growth. It either strips them (enforcement mode) or tags them for routing (tag-only mode). The metric stays intact — only the bad label is removed.
 
 ```
-Before:  {region="us-east", status="200", error.type="Lock wait timeout; txn=a3f9c..."}  ← over limit
+Before:  {region="us-east", status="200", error.type="Lock wait timeout; txn=a3f9c..."}
 After:   {region="us-east", status="200"}
 ```
 
-The 50,000 unique `error.type` values are flattened instantly. Your `region` and `status` dimensions survive untouched, so your P99 latency and traffic dashboards keep working.
+`region` and `status` survive. Your latency dashboards keep working. The 50,000 unique exception strings are gone.
 
-### Tag-Only Mode
+## How it works
 
-When `tag_only: true`, nothing is deleted. The processor injects `otel.metric.overflow: true` so a downstream routing processor can divert tagged metrics to cheap storage while clean metrics flow to your primary TSDB.
-
+```mermaid
+flowchart LR
+    A[Metric arrives] --> B[Hash metric name]
+    B --> C[Select 1 of 256 shards]
+    C --> D[For each label: hash value, insert into HLL++ sketch]
+    D --> E{Delta > threshold?}
+    E -- No --> F[Pass through]
+    E -- Yes --> G{tag_only?}
+    G -- Yes --> H[Add otel.metric.overflow tag]
+    G -- No --> I[Strip label]
 ```
-Before:  {region="us-east", status="200", error.type="Lock wait timeout; txn=a3f9c..."}  ← over limit
-After:   {region="us-east", status="200", error.type="Lock wait timeout; txn=a3f9c...", otel.metric.overflow: true}
+
+Key design decisions:
+
+- **Delta-based detection, not absolute thresholds.** A label with 50K stable values is fine. A label that grew by 500 in the last epoch is a problem. The processor tracks growth rate using dual-epoch HyperLogLog++ sketches, so legitimate high-cardinality metrics aren't penalized.
+
+- **256-way sharding.** Each shard has its own `RWMutex`. With 50 concurrent goroutines across 256 shards, average occupancy is ~0.4 per shard. Contention is near zero. Shard selection is `hash & 0xFF` — one CPU cycle.
+
+- **HLL++ with ~2KB per tracker.** Each sketch estimates cardinality regardless of whether 100 or 100M unique values have been observed. 1-2% accuracy. The `axiomhq/hyperloglog` library's `InsertHash(uint64)` path avoids allocation on the hot path.
+
+- **Stale eviction.** Trackers that haven't been seen for two epochs are cleaned up. Memory stays bounded.
+
+## Performance
+
+| Benchmark | Result |
+|---|---|
+| Hot path (shouldDrop) | ~91 ns/op, **0 allocs** |
+| Full pipeline passthrough | ~1.3 μs per batch |
+| Sustained load (8 workers, 60s) | **870K metrics/sec** |
+| telemetrygen blast (8 workers, 30s) | **827K metrics/sec**, zero errors |
+| Memory (52M metrics over 60s) | Heap grew **12%** (5.3→5.9 MB) |
+
+All benchmarks reproducible: `make bench` and `make bench-load`. Full details in [BENCHMARKS.md](BENCHMARKS.md).
+
+## Configuration
+
+```yaml
+processors:
+  cardinality_guardian:
+    # Max new unique values per label per epoch before enforcement triggers
+    max_cardinality_delta_per_epoch: 500
+
+    # Epoch rotation interval (seconds, minimum 10)
+    epoch_duration_seconds: 300
+
+    # true = tag only (add otel.metric.overflow), false = strip the label
+    tag_only: true
+
+    # Labels that are never stripped regardless of cardinality
+    never_drop_labels:
+      - region
+      - environment
+      - service.name
+
+    # Per-metric threshold overrides (falls back to global if unset)
+    metric_overrides:
+      http.server.request.duration: 5000
+      db.query.duration: 50
+
+    # Emit gauge with top N highest-delta trackers
+    top_offenders_count: 10
+
+    # Max tracked metric+label pairs (0 = unlimited)
+    max_tracker_count: 100000
+
+    # Dollar value per series prevented, for ROI dashboards
+    estimated_cost_per_metric_month: 0.05
 ```
 
-No data is lost. You can route the tagged overflow to S3 or a dev TSDB for debugging, while clean metrics continue flowing to production. This is ideal for initial rollout — observe first, enforce later.
+## Comparison with existing processors
 
----
+| | Cardinality Guardian | filterprocessor | metricstransformprocessor |
+|---|---|---|---|
+| Detection | Dynamic (growth rate) | Static allow/deny lists | Static rules |
+| Granularity | Per-label | Per-metric (drops entire metric) | Per-metric |
+| False positives on stable high-cardinality | No (delta-based) | Yes (if above threshold) | Yes |
+| Tag-only mode | Yes | No | No |
+| Per-metric overrides | Yes | N/A | N/A |
+| Top-N offender reporting | Yes | No | No |
+| Memory per tracker | ~2KB (HLL++) | N/A | N/A |
+
+`filterprocessor` and `metricstransformprocessor` are configuration-driven: you tell them what to drop. This processor is data-driven: it figures out what to drop based on observed behavior. The use cases are complementary, not competing.
+
+## Operation modes
+
+### Enforcement (default)
+
+The processor strips the offending label. The data point is preserved with remaining labels intact.
+
+### Tag-only
+
+The processor adds `otel.metric.overflow: true` without removing anything. Use this for:
+
+- Initial deployment — see what gets flagged before enforcing
+- Dual-routing — send tagged metrics to cheap storage, clean metrics to your TSDB
+- Gradual rollout — switch to enforcement per-metric after validation
+
+Start with tag-only. Always.
 
 ## Building the Collector
 
@@ -73,7 +146,7 @@ You must download the specific `ocb` binary that matches both your operating sys
 For example, to download OTel `v0.148.0` on macOS ARM64:
 ```bash
 curl --proto '=https' --tlsv1.2 -fL -o ocb \
-https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/cmd%2Fbuilder%2Fv0.148.0/ocb_0.148.0_darwin_arm64
+  https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/cmd%2Fbuilder%2Fv0.148.0/ocb_0.148.0_darwin_arm64
 chmod +x ocb
 ```
 
@@ -95,7 +168,7 @@ receivers:
 
 processors:
   - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.148.0
-  - gomod: github.com/YElayyat/otel-cardinality-processor v1.0.2
+  - gomod: github.com/YElayyat/otel-cardinality-processor v1.1.0
     name: cardinalityprocessor
     import: github.com/YElayyat/otel-cardinality-processor/cardinalityprocessor
 ```
@@ -124,7 +197,7 @@ processors:
       - http.status_code
       - service.name
     tag_only: false                           # true = observe only, false = enforce
-    max_tracker_count: 0                     # Set > 0 to bound memory (0 = unlimited). Rejected pairs emit via telemetry gauge.
+    max_tracker_count: 0                     # Set > 0 to bound memory (0 = unlimited)
     top_offenders_count: 10                  # How many high-growth trackers to report via telemetry gauge
     estimated_cost_per_metric_month: 0.05    # For ROI tracking ($/series/month)
     metric_overrides:                        # Optional per-metric cardinality limits
@@ -145,21 +218,17 @@ Once your configuration is ready, run your custom binary:
 ./build/otelcol-custom --config=otel-collector-config.yaml
 ```
 
----
+## Telemetry
 
-## Built-In Telemetry
+The processor emits internal metrics via the OTel SDK:
 
 | Metric | Type | Description |
 |---|---|---|
+| `processor_trackers_active` | Gauge | Current tracked metric+label pairs across all 256 shards |
 | `processor_labels_stripped_total` | Counter | Attributes stripped or tagged per data point. Use `rate()` for spike detection. |
-| `processor_top_offenders` | Gauge | Top N (metric, label) pairs by unique-value growth during the last 5-minute epoch. Attributes: `metric_name`, `label_key`. |
-| `processor_trackers_rejected_total` | Counter | Number of new (metric, label) pairs ignored because `max_tracker_count` limit was reached. |
-| `estimated_savings_dollars_total` | Counter | Dollar value of series prevented from reaching your TSDB. |
-| `processor_trackers_active` | Gauge | Live `(metric, attribute)` trackers across all 256 shards. |
-
-See [ARCHITECTURE.md](ARCHITECTURE.md#telemetry-deep-dive) for how to expose these metrics via Prometheus or OTLP, and ROI monitoring queries.
-
----
+| `processor_top_offenders` | Gauge | Top N highest-delta trackers with `metric_name` and `label_key` attributes |
+| `processor_trackers_rejected_total` | Counter | Trackers rejected after hitting `max_tracker_count` |
+| `estimated_savings_dollars_total` | Counter | Dollar value of series prevented from reaching your TSDB |
 
 ## Example Configurations
 
@@ -169,7 +238,12 @@ The `examples/` directory includes production-ready templates:
 * **`examples/datadog/`** — Datadog native export pipeline
 * **`examples/builder.yaml`** — OCB build manifest
 
----
+## Roadmap
+
+- [ ] Hot configuration reload (change thresholds without pipeline restart)
+- [ ] Drop log sampling (reduce log volume from enforcement events)
+- [ ] Grafana dashboard template
+- [ ] Pre-built Docker image
 
 ## Getting Started (Development)
 
@@ -187,8 +261,6 @@ make fuzz FUZZ_TIME=60s   # Fuzz the core decision logic
 make stress-test STRESS_COUNT=1000   # Concurrency stress test
 make e2e            # Build custom collector + black-box E2E test
 ```
-
----
 
 ## Project Layout
 
@@ -221,8 +293,6 @@ cardinality-guardian/
 └── go.mod
 ```
 
----
-
 ## Further Reading
 
 * **[ARCHITECTURE.md](ARCHITECTURE.md)** — Design decisions, HLL math, sharding, zero-alloc hot path, telemetry setup, component naming
@@ -230,14 +300,12 @@ cardinality-guardian/
 * **[BENCHMARKS.md](BENCHMARKS.md)** — Full benchmark suite with reproducible numbers
 * **[CONTRIBUTING.md](CONTRIBUTING.md)** — Development workflow and submission guidelines
 
----
-
 ## Contributing
 
 We welcome issues and pull requests! Please open an issue before submitting large architectural changes. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
----
+There's an open [donation request](https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/47368) for inclusion in otel-collector-contrib. It needs a sponsor from the existing maintainer team. If you've tried this processor and want to see it in the official distribution, commenting on that issue helps.
 
 ## License
 
-This project is licensed under the Apache License 2.0 — see the [LICENSE](LICENSE) file for details.
+Apache 2.0
