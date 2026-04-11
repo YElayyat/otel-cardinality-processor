@@ -168,7 +168,7 @@ receivers:
 
 processors:
   - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.148.0
-  - gomod: github.com/YElayyat/otel-cardinality-processor v1.1.0
+  - gomod: github.com/YElayyat/otel-cardinality-processor v1.2.0
     name: cardinalityprocessor
     import: github.com/YElayyat/otel-cardinality-processor/cardinalityprocessor
 ```
@@ -241,7 +241,6 @@ The `examples/` directory includes production-ready templates:
 ## Roadmap
 
 - [ ] Hot configuration reload (change thresholds without pipeline restart)
-- [ ] Drop log sampling (reduce log volume from enforcement events)
 - [ ] Grafana dashboard template
 - [ ] Pre-built Docker image
 
