@@ -43,10 +43,9 @@ func NewFactory() processor.Factory {
 // createDefaultConfig returns a *Config populated with safe, conservative
 // defaults that are suitable for most production environments:
 //
-//   - MaxCardinalityDeltaPerEpoch: 500 — allows up to 500 new unique label values
-//     per metric+key per 5-minute window before enforcement kicks in. This matches
-//     the examples in the README and accommodates common high-cardinality labels
-//     like http.url while still catching runaway explosions.
+//   - MaxCardinalityDeltaPerEpoch: 100 — allows up to 100 new unique label values
+//     per metric+key per 5-minute window before enforcement kicks in. This accommodates
+//     common labels while still catching runaway explosions.
 //   - EpochDurationSeconds: 300 — a 5-minute sliding window that aligns well
 //     with common scrape intervals and on-call alert evaluation periods.
 //   - NeverDropLabels: "http.status_code" and "region" — two labels that are
@@ -57,7 +56,7 @@ func NewFactory() processor.Factory {
 //     per-series cost for managed Prometheus services.
 func createDefaultConfig() component.Config {
 	return &Config{
-		MaxCardinalityDeltaPerEpoch: 500,
+		MaxCardinalityDeltaPerEpoch: 100,
 		EpochDurationSeconds:        300,
 		NeverDropLabels:             []string{"http.status_code", "region"},
 		TagOnly:                     false, // Default to hard-drop for backward compatibility
