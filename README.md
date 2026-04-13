@@ -155,7 +155,7 @@ flowchart TD
     G -- No --> L
 ```
 
-## Building the Collector
+## Building the Collector (Custom OCB Build)
 
 Because this is a custom processor, you must compile it into your binary using the OpenTelemetry Collector Builder (OCB). See the [official documentation](https://opentelemetry.io/docs/collector/extend/ocb/) for full details and release mapping.
 
