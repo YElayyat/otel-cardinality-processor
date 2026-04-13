@@ -135,6 +135,26 @@ The processor adds `otel.metric.overflow: true` without removing anything. Use t
 
 Start with tag-only. Always.
 
+## Deployment Options
+
+```mermaid
+flowchart TD
+    A[Want to try Cardinality Guardian?] --> B{How do you run OTel Collector?}
+    B -- "Docker / K8s" --> C["docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.3.0"]
+    B -- "Custom binary (OCB)" --> D[Add to builder.yaml → ocb --config builder.yaml]
+    B -- "otel-collector-contrib" --> E["Coming soon — donation pending"]
+    C --> F[Mount your config.yaml]
+    D --> F
+    F --> G{First deployment?}
+    G -- Yes --> H["Set tag_only: true"]
+    H --> I[Watch processor_top_offenders in Grafana]
+    I --> J{Tune thresholds?}
+    J -- Yes --> K[Add metric_overrides / never_drop_labels]
+    K --> I
+    J -- No --> L["Switch to tag_only: false → Production"]
+    G -- No --> L
+```
+
 ## Building the Collector
 
 Because this is a custom processor, you must compile it into your binary using the OpenTelemetry Collector Builder (OCB). See the [official documentation](https://opentelemetry.io/docs/collector/extend/ocb/) for full details and release mapping.
@@ -218,7 +238,7 @@ Once your configuration is ready, run your custom binary:
 ./build/otelcol-custom --config=otel-collector-config.yaml
 ```
 
-## Docker Deployment
+## Docker Deployment (Official Image)
 
 The official Docker image is automatically built and published to the GitHub Container Registry (GHCR) and supports both `linux/amd64` and `linux/arm64`.
 
@@ -325,11 +345,6 @@ The `examples/` directory includes production-ready templates:
 * **`examples/prometheus/`** — Docker Compose stack with pre-configured Grafana dashboard
 * **`examples/datadog/`** — Datadog native export pipeline
 * **`examples/builder.yaml`** — OCB build manifest
-
-## Roadmap
-
-- [ ] Hot configuration reload (change thresholds without pipeline restart)
-- [ ] Grafana dashboard template
 
 ## Getting Started (Development)
 
