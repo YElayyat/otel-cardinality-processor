@@ -1,0 +1,10 @@
+.git
+.github
+test/
+scripts/
+build/
+coverage.out
+coverage.txt
+.golangci.yml
+.codecov.yml
+*.o
