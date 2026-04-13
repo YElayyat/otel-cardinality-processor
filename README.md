@@ -168,7 +168,7 @@ receivers:
 
 processors:
   - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.148.0
-  - gomod: github.com/YElayyat/otel-cardinality-processor v1.2.0
+  - gomod: github.com/YElayyat/otel-cardinality-processor v1.3.0
     name: cardinalityprocessor
     import: github.com/YElayyat/otel-cardinality-processor/cardinalityprocessor
 ```
