@@ -220,13 +220,17 @@ Once your configuration is ready, run your custom binary:
 
 ## Docker Deployment
 
-The repository includes a multi-stage `Dockerfile` to build a secure, statically linked custom OTel Collector image based on a minimal Debian environment with unprivileged user enforcement.
+The official Docker image is automatically built and published to the GitHub Container Registry (GHCR) and supports both `linux/amd64` and `linux/arm64`.
 
-### 1. Build the Image
+### 1. Pull the Image
+
+To run the Cardinality Guardian, pull the latest official image:
 
 ```bash
-docker build -t otel-cardinality-guardian .
+docker pull ghcr.io/yelayyat/otel-cardinality-processor:latest
 ```
+
+*(Optional: You can also build the secure, distroless-like multi-stage Dockerfile manually via `docker build -t ghcr.io/yelayyat/otel-cardinality-processor:latest .`)*
 
 ### 2. Run the Container
 
@@ -236,7 +240,7 @@ You must mount your configuration file. By default, the `ENTRYPOINT` expects thi
 docker run --rm \
   -v $(pwd)/examples/otel-collector-config.yaml:/etc/otelcol/config.yaml \
   -p 4317:4317 -p 4318:4318 -p 13133:13133 \
-  otel-cardinality-guardian
+  ghcr.io/yelayyat/otel-cardinality-processor:latest
 ```
 
 ### 3. Verify Health and Tagging
@@ -276,7 +280,6 @@ The `examples/` directory includes production-ready templates:
 
 - [ ] Hot configuration reload (change thresholds without pipeline restart)
 - [ ] Grafana dashboard template
-- [x] Pre-built Docker image
 
 ## Getting Started (Development)
 
