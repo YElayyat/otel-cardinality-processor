@@ -218,6 +218,40 @@ Once your configuration is ready, run your custom binary:
 ./build/otelcol-custom --config=otel-collector-config.yaml
 ```
 
+## Docker Deployment
+
+The repository includes a multi-stage `Dockerfile` to build a secure, statically linked custom OTel Collector image based on a minimal Debian environment with unprivileged user enforcement.
+
+### 1. Build the Image
+
+```bash
+docker build -t otel-cardinality-guardian .
+```
+
+### 2. Run the Container
+
+You must mount your configuration file. By default, the `ENTRYPOINT` expects this configuration at `/etc/otelcol/config.yaml`. The collector operates as an unprivileged user (`otel`), exposing standard OTLP ports (4317, 4318), Prometheus metrics (8888), and the Healthcheck extension (13133). 
+
+```bash
+docker run --rm \
+  -v $(pwd)/examples/otel-collector-config.yaml:/etc/otelcol/config.yaml \
+  -p 4317:4317 -p 4318:4318 -p 13133:13133 \
+  otel-cardinality-guardian
+```
+
+### 3. Verify Health and Tagging
+
+In a separate terminal, verify the container is healthy via the healthcheck endpoint:
+```bash
+curl http://localhost:13133/
+```
+
+Run the container with the provided example config and send a test metric using `telemetrygen` or `curl` to verify the `otel.metric.overflow` tag is actually being added:
+```bash
+# Using telemetrygen (requires installing telemetrygen first)
+telemetrygen metrics --otlp-insecure --traces 0 --metrics 100 --metrics-per-request 1
+```
+
 ## Telemetry
 
 The processor emits internal metrics via the OTel SDK:
@@ -242,7 +276,7 @@ The `examples/` directory includes production-ready templates:
 
 - [ ] Hot configuration reload (change thresholds without pipeline restart)
 - [ ] Grafana dashboard template
-- [ ] Pre-built Docker image
+- [x] Pre-built Docker image
 
 ## Getting Started (Development)
 
