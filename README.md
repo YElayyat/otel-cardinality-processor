@@ -16,7 +16,7 @@ It strips only the exploding label — not the entire data point. Your dashboard
 ```yaml
 processors:
   cardinality_guardian:
-    max_cardinality_delta_per_epoch: 500
+    max_cardinality_delta_per_epoch: 100
     epoch_duration_seconds: 300
     tag_only: true
 ```
@@ -50,7 +50,7 @@ flowchart LR
 
 Key design decisions:
 
-- **Delta-based detection, not absolute thresholds.** A label with 50K stable values is fine. A label that grew by 500 in the last epoch is a problem. The processor tracks growth rate using dual-epoch HyperLogLog++ sketches, so legitimate high-cardinality metrics aren't penalized.
+- **Delta-based detection, not absolute thresholds.** A label with 50K stable values is fine. A label that grew by 100 in the last epoch is a problem. The processor tracks growth rate using dual-epoch HyperLogLog++ sketches, so legitimate high-cardinality metrics aren't penalized.
 
 - **256-way sharding.** Each shard has its own `RWMutex`. With 50 concurrent goroutines across 256 shards, average occupancy is ~0.4 per shard. Contention is near zero. Shard selection is `hash & 0xFF` — one CPU cycle.
 
@@ -75,8 +75,8 @@ All benchmarks reproducible: `make bench` and `make bench-load`. Full details in
 ```yaml
 processors:
   cardinality_guardian:
-    # Max new unique values per label per epoch before enforcement triggers
-    max_cardinality_delta_per_epoch: 500
+    # Max new unique values per (metric, attribute) per epoch
+    max_cardinality_delta_per_epoch: 100
 
     # Epoch rotation interval (seconds, minimum 10)
     epoch_duration_seconds: 300
@@ -190,7 +190,7 @@ Before running the built collector, you must create a configuration file (`otel-
 
 processors:
   cardinality_guardian:
-    max_cardinality_delta_per_epoch: 500    # Max new unique values per (metric, attribute) per epoch
+    max_cardinality_delta_per_epoch: 100    # Max new unique values per (metric, attribute) per epoch
     epoch_duration_seconds: 300              # Length of the sliding window
     never_drop_labels:                       # Labels that are never stripped
       - region
@@ -227,34 +227,84 @@ The official Docker image is automatically built and published to the GitHub Con
 To run the Cardinality Guardian, pull the latest official image:
 
 ```bash
-docker pull ghcr.io/yelayyat/otel-cardinality-processor:latest
+docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.3.0
 ```
 
 *(Optional: You can also build the secure, distroless-like multi-stage Dockerfile manually via `docker build -t ghcr.io/yelayyat/otel-cardinality-processor:latest .`)*
 
-### 2. Run the Container
+### 2. Quick Start (Local Testing)
 
 You must mount your configuration file. By default, the `ENTRYPOINT` expects this configuration at `/etc/otelcol/config.yaml`. The collector operates as an unprivileged user (`otel`), exposing standard OTLP ports (4317, 4318), Prometheus metrics (8888), and the Healthcheck extension (13133). 
 
+1. **Run the Container**:
 ```bash
 docker run --rm \
   -v $(pwd)/examples/otel-collector-config.yaml:/etc/otelcol/config.yaml \
   -p 4317:4317 -p 4318:4318 -p 13133:13133 \
-  ghcr.io/yelayyat/otel-cardinality-processor:latest
+  ghcr.io/yelayyat/otel-cardinality-processor:v1.3.0
 ```
 
-### 3. Verify Health and Tagging
-
+2. **Verify Health**:
 In a separate terminal, verify the container is healthy via the healthcheck endpoint:
 ```bash
 curl http://localhost:13133/
 ```
 
-Run the container with the provided example config and send a test metric using `telemetrygen` or `curl` to verify the `otel.metric.overflow` tag is actually being added:
+3. **Send Test Data**:
+Send a test metric to verify the `otel.metric.overflow` tag is being added:
 ```bash
 # Using telemetrygen (requires installing telemetrygen first)
 telemetrygen metrics --otlp-insecure --traces 0 --metrics 100 --metrics-per-request 1
 ```
+
+### 3. Enterprise Rollout Strategy
+
+For production environments, SREs should follow an "Observe then Enforce" strategy. This allows you to validate thresholds before physically dropping data.
+
+#### Step A: Create a production config
+Create `guardian-config.yaml` with `tag_only: true` to begin in observation mode. We'll set a tighter threshold of `100` new series per epoch for protection:
+
+```yaml
+# guardian-config.yaml
+processors:
+  cardinality_guardian:
+    # Tighter threshold: drop/tag labels that grow by >100 unique values per epoch
+    max_cardinality_delta_per_epoch: 100
+    epoch_duration_seconds: 300
+    tag_only: true  # Start in observation mode (add tag, don't strip)
+    never_drop_labels:
+      - service.name
+      - env
+      - region
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch, cardinality_guardian]
+      exporters: [otlp]
+```
+
+#### Step B: Deploy as a Background Service
+Run the container in detached mode (`-d`) and pin to a specific version (e.g., `v1.3.0`) instead of `latest` for stability:
+
+```bash
+docker run -d \
+  --name otel-guardian \
+  -v $(pwd)/guardian-config.yaml:/etc/otelcol/config.yaml \
+  -p 4317:4317 -p 4318:4318 -p 13133:13133 \
+  ghcr.io/yelayyat/otel-cardinality-processor:v1.3.0
+```
+
+#### Step C: Monitor and Switch
+1.  **Monitor**: Watch your dashboard for the `otel.metric.overflow` tag.
+2.  **Verify Health**: `curl http://localhost:13133/`
+3.  **Enforce**: Once you are confident in your thresholds, update the config to `tag_only: false` and restart the container to begin active enforcement.
 
 ## Telemetry
 
