@@ -9,9 +9,6 @@
 [![Status](https://img.shields.io/badge/Status-Development-yellow)](./CONTRIBUTING.md)
 [![Benchmarks](https://img.shields.io/badge/Benchmarks-~91ns%2Fop%20|%20827K%20metrics%2Fs-brightgreen)](./BENCHMARKS.md)
 
-> [!IMPORTANT]
-> **v1.3.0 Breaking Change**: The default `max_cardinality_delta_per_epoch` has been reduced from `500` to `100`. If you rely on the legacy default, update your configuration explicitly. See [CHANGELOG.md](./CHANGELOG.md) for details.
-
 An OpenTelemetry Collector processor that catches metric cardinality explosions before they reach your TSDB.
 
 It strips only the exploding label — not the entire data point. Your dashboards keep working.
@@ -143,7 +140,7 @@ Start with tag-only. Always.
 ```mermaid
 flowchart TD
     A[Want to try Cardinality Guardian?] --> B{How do you run OTel Collector?}
-    B -- "Docker / K8s" --> C["docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.3.0"]
+    B -- "Docker / K8s" --> C["docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.3.1"]
     B -- "Custom binary (OCB)" --> D[Add to builder.yaml → ocb --config builder.yaml]
     B -- "otel-collector-contrib" --> E["Coming soon — donation pending"]
     C --> F[Mount your config.yaml]
@@ -191,7 +188,7 @@ receivers:
 
 processors:
   - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.148.0
-  - gomod: github.com/YElayyat/otel-cardinality-processor v1.3.0
+  - gomod: github.com/YElayyat/otel-cardinality-processor v1.3.1
     name: cardinalityprocessor
     import: github.com/YElayyat/otel-cardinality-processor/cardinalityprocessor
 ```
@@ -250,7 +247,7 @@ The official Docker image is automatically built and published to the GitHub Con
 To run the Cardinality Guardian, pull the latest official image:
 
 ```bash
-docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.3.0
+docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.3.1
 ```
 
 *(Optional: You can also build the secure, distroless-like multi-stage Dockerfile manually via `docker build -t ghcr.io/yelayyat/otel-cardinality-processor:latest .`)*
@@ -264,7 +261,7 @@ You must mount your configuration file. By default, the `ENTRYPOINT` expects thi
 docker run --rm \
   -v $(pwd)/examples/otel-collector-config.yaml:/etc/otelcol/config.yaml \
   -p 4317:4317 -p 4318:4318 -p 13133:13133 \
-  ghcr.io/yelayyat/otel-cardinality-processor:v1.3.0
+  ghcr.io/yelayyat/otel-cardinality-processor:v1.3.1
 ```
 
 2. **Verify Health**:
@@ -314,14 +311,14 @@ service:
 ```
 
 #### Step B: Deploy as a Background Service
-Run the container in detached mode (`-d`) and pin to a specific version (e.g., `v1.3.0`) instead of `latest` for stability:
+Run the container in detached mode (`-d`) and pin to a specific version (e.g., `v1.3.1`) instead of `latest` for stability:
 
 ```bash
 docker run -d \
   --name otel-guardian \
   -v $(pwd)/guardian-config.yaml:/etc/otelcol/config.yaml \
   -p 4317:4317 -p 4318:4318 -p 13133:13133 \
-  ghcr.io/yelayyat/otel-cardinality-processor:v1.3.0
+  ghcr.io/yelayyat/otel-cardinality-processor:v1.3.1
 ```
 
 #### Step C: Monitor and Switch
