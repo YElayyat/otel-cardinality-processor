@@ -9,6 +9,9 @@
 [![Status](https://img.shields.io/badge/Status-Development-yellow)](./CONTRIBUTING.md)
 [![Benchmarks](https://img.shields.io/badge/Benchmarks-~91ns%2Fop%20|%20827K%20metrics%2Fs-brightgreen)](./BENCHMARKS.md)
 
+> [!IMPORTANT]
+> **v1.3.0 Breaking Change**: The default `max_cardinality_delta_per_epoch` has been reduced from `500` to `100`. If you rely on the legacy default, update your configuration explicitly. See [CHANGELOG.md](./CHANGELOG.md) for details.
+
 An OpenTelemetry Collector processor that catches metric cardinality explosions before they reach your TSDB.
 
 It strips only the exploding label — not the entire data point. Your dashboards keep working.

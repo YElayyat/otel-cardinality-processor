@@ -36,5 +36,34 @@ We use a `Makefile` to standardize these commands:
 4. Ensure all CI checks (Lint, Test, Vulncheck) are green. 
 5. A maintainer will review your code. Please respond promptly to any review comments.
 
+## Local CI Testing (with `act`)
+
+To catch CI errors (like YAML syntax or tag logic) before pushing, we recommend using [act](https://github.com/nektos/act).
+
+1. **Install**: `brew install act`
+2. **Test Tag Workflow**:
+   Create a temporary `.github/test-event.json`:
+   ```json
+   {
+     "ref": "refs/tags/v1.3.1",
+     "ref_type": "tag"
+   }
+   ```
+   Run: `act push --eventpath .github/test-event.json --secret GITHUB_TOKEN=$GITHUB_TOKEN`
+
+## Release Checklist
+
+Follow these steps for every release to ensure stability and avoid breaking image digests:
+
+1. **Sync**: Ensure all changes are committed and pushed to `main`.
+2. **Verify**: Run `make test` and `make e2e` locally.
+3. **Simulate**: Test the workflow locally using `act` (see above).
+4. **Tag**:
+   ```bash
+   git tag v1.3.1
+   git push origin v1.3.1
+   ```
+   **NEVER force-push a tag (`git push -f`).** If a release fails or needs a fix, increment the patch version (e.g., `v1.3.2`) and tag again. Force-pushing tags breaks downstream users and image digests.
+
 ## 🔒 Security Vulnerabilities
 If you discover a vulnerability that could allow cardinality limits to be bypassed or cause a denial of service (DoS) within the collector, **do not open a public issue.** Please use [GitHub's Private Vulnerability Reporting](https://github.com/YElayyat/otel-cardinality-processor/security/advisories/new) feature to responsibly disclose the issue directly to the maintainers. We will review and respond to your report promptly through that secure channel.

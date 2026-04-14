@@ -24,7 +24,12 @@ exporters:
       # OTel to Datadog metric translation
       resource_attributes_as_tags: true
 
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
 service:
+  extensions: [health_check]
   # Route the processor's internal cost-savings metrics to Datadog!
   # This makes 'estimated_savings_dollars_total' queryable inside the DD SaaS.
   telemetry:

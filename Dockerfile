@@ -16,32 +16,20 @@ COPY . .
 WORKDIR /app/examples
 RUN CGO_ENABLED=0 builder --config builder.yaml
 
-# Final minimal stage
-FROM debian:bookworm-slim
+# Final minimal stage: True Distroless
+FROM gcr.io/distroless/static-debian12:nonroot
 
-# Create a non-privileged user and install curl for the healthcheck
-RUN groupadd -r otel && useradd -r -g otel otel && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+# Copy certificates for secure outbound connections
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 # Copy the static binary from the builder stage
-# Output path specified in builder.yaml is ./build, meaning /app/examples/build
 COPY --from=builder /app/examples/build/otelcol-custom /otelcol
 
-# Drop down to the unprivileged user
-USER otel
-
-# Expose standard OTLP and extension ports
-# 4317: OTLP gRPC
-# 4318: OTLP HTTP
-# 8888: Prometheus Metrics
-# 13133: Health Check Extension
+# Ports for OTLP (4317, 4318), Prometheus (8888), and Healthcheck (13133)
 EXPOSE 4317 4318 8888 13133
 
-# Add a healthcheck to monitor the collector's internal state
-HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
-  CMD curl -f http://localhost:13133/ || exit 1
+# Run as the unprivileged 'nonroot' user provided by distroless
+USER nonroot
 
-# Require configuration file to be mounted
+# Use OTel's health_check extension for external health monitoring
 ENTRYPOINT ["/otelcol", "--config=/etc/otelcol/config.yaml"]
