@@ -1,4 +1,15 @@
 services:
+  collector:
+    image: ghcr.io/yelayyat/otel-cardinality-processor:latest
+    container_name: cardinality-guardian
+    volumes:
+      - ../otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8888:8888"
+      - "13133:13133"
+
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
@@ -8,10 +19,8 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
     ports:
       - "9090:9090"
-    extra_hosts:
-      # Allows Prometheus inside Docker to scrape the OpenTelemetry Collector
-      # running locally on the macOS/Linux host machine.
-      - "host.docker.internal:host-gateway"
+    depends_on:
+      - collector
 
   grafana:
     image: grafana/grafana:latest
@@ -23,5 +32,4 @@ services:
     volumes:
       - ./provisioning:/etc/grafana/provisioning:ro
     depends_on:
-
       - prometheus
