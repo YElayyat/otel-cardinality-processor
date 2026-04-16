@@ -17,7 +17,8 @@ We maintain strict version requirements to ensure optimal performance and securi
 ### Getting Started
 1. Fork the repository and clone it locally.
 2. Install dependencies: `go mod tidy`
-3. Verify your environment by running the test suite via the provided Makefile.
+3. Install mdatagen (required for code generation): `go install go.opentelemetry.io/collector/cmd/mdatagen@latest`
+4. Verify your environment by running the test suite via the provided Makefile.
 
 ## ✅ The Quality Gate (CI)
 All Pull Requests must pass our automated CI pipeline before they can be merged. We recommend running these checks locally before pushing your code.

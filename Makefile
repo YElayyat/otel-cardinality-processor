@@ -11,6 +11,8 @@
 #   lint         - run golangci-lint (install first with: make install-lint)
 #   vet          - run go vet across all packages
 #   install-lint - download golangci-lint at the pinned version
+#   install-mdatagen - download mdatagen at the pinned version
+#   generate     - generate metadata files for all packages
 #   clean        - purge build/test caches, local fuzz corpus, and ocb binary
 #   help         - list all targets
 
@@ -145,6 +147,21 @@ vet:
 ## install-lint: download golangci-lint at the version pinned in scripts/install-lint.sh
 install-lint:
 	@bash scripts/install-lint.sh
+
+## install-mdatagen: download and install mdatagen
+MDATAGEN_VERSION ?= latest
+install-mdatagen:
+	@echo "Installing mdatagen v$(MDATAGEN_VERSION)..."
+	@tmp_dir=$$(mktemp -d) && \
+	cd $$tmp_dir && \
+	go mod init tempmod >/dev/null 2>&1 && \
+	go get go.opentelemetry.io/collector/cmd/mdatagen@$(MDATAGEN_VERSION) && \
+	GOBIN=$(shell go env GOPATH)/bin $(GO) install go.opentelemetry.io/collector/cmd/mdatagen && \
+	rm -rf $$tmp_dir
+	
+## generate: generate metadata files for all packages
+generate: install-mdatagen
+	cd cardinalityprocessor && go generate ./...
 
 ## clean: purge build cache, test cache, fuzz corpus, and the ocb binary
 clean:
