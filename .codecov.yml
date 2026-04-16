@@ -5,6 +5,9 @@ coverage:
         target: auto
         threshold: 1%
 
+fixes:
+  - "github.com/YElayyat/otel-cardinality-processor/::"
+
 ignore:
   - "internal/cmd/**/*"
   - "test/**/*"
