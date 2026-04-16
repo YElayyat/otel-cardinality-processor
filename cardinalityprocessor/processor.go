@@ -85,6 +85,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
+
+	"github.com/YElayyat/otel-cardinality-processor/cardinalityprocessor/internal/metadata"
 )
 
 // staleSweepEpochs is the number of consecutive epochs a tracker must receive
@@ -385,14 +387,10 @@ type cardinalityProcessor struct {
 	// dropsThisEpoch tracks total drops this epoch for the suppression summary.
 	dropsThisEpoch atomic.Int64
 
-	// gaugeRegistration holds the handle returned by meter.RegisterCallback so
-	// the callback can be cleanly unregistered in Shutdown(). This is critical
-	// for GC correctness: the OTel SDK holds a strong reference to every
-	// registered callback closure. Without Unregister(), the closure (which
-	// captures p via the `p.shards` reference) would keep the processor alive
-	// until the SDK's MeterProvider is shut down — potentially leaking the
-	// entire 256-shard tracker map across pipeline reconfigurations.
-	gaugeRegistration metric.Registration
+	// telemetry holds the mdatagen TelemetryBuilder to allow clean un-registration
+	// during Shutdown. This is critical for GC correctness to prevent closures
+	// from keeping the processor alive indefinitely.
+	telemetry *metadata.TelemetryBuilder
 
 	// topOffenders holds the most recent Top-N snapshot, computed during
 	// rotate(). Read by the telemetry callback; written by rotate().
@@ -433,92 +431,66 @@ func newCardinalityProcessor(ctx context.Context, cfg *Config, set processor.Set
 		}
 	}
 
-	// Instrumentation scope matches the component type so dashboards and
-	// alert rules can filter by a consistent, human-readable name.
-	meter := set.TelemetrySettings.MeterProvider.Meter(typeStr)
-	var err error
+	builder, err := metadata.NewTelemetryBuilder(set.TelemetrySettings)
+	if err != nil {
+		return nil, err
+	}
+	p.telemetry = builder
 
-	// Convert our previously synchronous counters into Observable metrics so
-	// we can dynamically compute the savings based on exact integer multiples,
-	// rather than blindly accruing IEEE-754 floating point dust.
-	counterStripped, err := meter.Int64ObservableCounter(
-		"processor_labels_stripped_total",
-		metric.WithDescription("Total number of high-cardinality labels stripped or tagged."),
-	)
+	err = builder.RegisterProcessorCardinalityTrackersActiveCallback(func(_ context.Context, o metric.Int64Observer) error {
+		var totalActive int64
+		for i := range p.shards {
+			p.shards[i].mu.RLock()
+			totalActive += int64(len(p.shards[i].trackers))
+			p.shards[i].mu.RUnlock()
+		}
+		o.Observe(totalActive)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	counterSavings, err := meter.Float64ObservableCounter(
-		"estimated_savings_dollars_total",
-		metric.WithDescription("Cumulative estimated dollar value of time-series churn prevented by the processor."),
-	)
+	err = builder.RegisterProcessorCardinalityLabelsStrippedCallback(func(_ context.Context, o metric.Int64Observer) error {
+		o.Observe(p.labelsStripped.Load())
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	gaugeActive, err := meter.Int64ObservableGauge(
-		"processor_trackers_active",
-		metric.WithDescription("Current number of active cardinality trackers across all shards."),
-	)
+	err = builder.RegisterProcessorCardinalitySavingsEstimatedCallback(func(_ context.Context, o metric.Float64Observer) error {
+		drops := p.labelsStripped.Load()
+		savings := float64(drops) * p.estimatedCostPerMetricMonth
+		roundedSavings := math.Round(savings*100) / 100
+		o.Observe(roundedSavings)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	counterRejected, err := meter.Int64ObservableCounter(
-		"processor_trackers_rejected_total",
-		metric.WithDescription("Number of new (metric, label) pairs ignored because max_tracker_count was reached."),
-	)
+	err = builder.RegisterProcessorCardinalityTrackersRejectedCallback(func(_ context.Context, o metric.Int64Observer) error {
+		o.Observe(p.trackersRejected.Load())
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	gaugeTopOffenders, err := meter.Int64ObservableGauge(
-		"processor_top_offenders",
-		metric.WithDescription("Cardinality delta of the top-N highest-growth (metric, label) pairs from the last epoch rotation."),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	p.gaugeRegistration, err = meter.RegisterCallback(
-		func(_ context.Context, o metric.Observer) error {
-			// 1. Report active trackers
-			var totalActive int64
-			for i := range p.shards {
-				p.shards[i].mu.RLock()
-				totalActive += int64(len(p.shards[i].trackers))
-				p.shards[i].mu.RUnlock()
-			}
-			o.ObserveInt64(gaugeActive, totalActive)
-
-			// 2. Report drops and apply 2-decimal rounded precision to the dollar calculation
-			drops := p.labelsStripped.Load()
-			o.ObserveInt64(counterStripped, drops)
-
-			savings := float64(drops) * p.estimatedCostPerMetricMonth
-			roundedSavings := math.Round(savings*100) / 100
-			o.ObserveFloat64(counterSavings, roundedSavings)
-
-			// 3. Report rejected trackers
-			o.ObserveInt64(counterRejected, p.trackersRejected.Load())
-
-			// 4. Report top-N offenders with metric_name and label_key attributes
-			p.topOffendersMu.RLock()
-			for _, entry := range p.topOffenders {
-				o.ObserveInt64(gaugeTopOffenders, int64(entry.delta),
-					metric.WithAttributes(
-						attribute.String("metric_name", entry.metricName),
-						attribute.String("label_key", entry.labelKey),
-					),
-				)
-			}
-			p.topOffendersMu.RUnlock()
-
-			return nil
-		},
-		gaugeActive, counterStripped, counterSavings, gaugeTopOffenders, counterRejected,
-	)
+	err = builder.RegisterProcessorCardinalityTopOffendersCallback(func(_ context.Context, o metric.Int64Observer) error {
+		p.topOffendersMu.RLock()
+		for _, entry := range p.topOffenders {
+			o.Observe(int64(entry.delta),
+				metric.WithAttributes(
+					attribute.String("metric_name", entry.metricName),
+					attribute.String("label_key", entry.labelKey),
+				),
+			)
+		}
+		p.topOffendersMu.RUnlock()
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -910,10 +882,8 @@ func (p *cardinalityProcessor) Start(_ context.Context, _ component.Host) error 
 //     exit on its next select iteration, stopping epoch rotations cleanly.
 func (p *cardinalityProcessor) Shutdown(_ context.Context) error {
 	p.logger.Info("Shutting down cardinality processor")
-	if p.gaugeRegistration != nil {
-		if err := p.gaugeRegistration.Unregister(); err != nil {
-			p.logger.Error("failed to unregister gauge callback", zap.Error(err))
-		}
+	if p.telemetry != nil {
+		p.telemetry.Shutdown()
 	}
 	p.cancel()
 	return nil
