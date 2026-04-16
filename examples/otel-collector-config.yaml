@@ -8,7 +8,7 @@ receivers:
 
 processors:
   cardinality_guardian:
-    max_cardinality_delta_per_epoch: 100
+    max_cardinality_delta_per_epoch: 50
     epoch_duration_seconds: 300
     never_drop_labels:
       - region

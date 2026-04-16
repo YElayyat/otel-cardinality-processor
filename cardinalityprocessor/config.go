@@ -66,10 +66,9 @@ type Config struct {
 	// which is valuable in regulated environments or during initial rollout.
 	TagOnly bool `mapstructure:"tag_only"`
 
-	// EstimatedCostPerMetricMonth is the dollar value assigned to each unique
-	// time series that the processor prevents from entering a paid TSDB. It is
-	// used solely to populate the "estimated_savings_dollars_total" OTel counter
-	// for cost-visibility dashboards; it has no effect on the processor's
+	// EstimatedCostPerMetricMonth configures the theoretical cost per active time-series. This is 
+	// used solely to populate the "otelcol_processor_cardinality_estimated_savings_dollars_total" OTel counter
+	// emitted by this processor. It allows platform owners to quantify FinOps ROI directly in the processor's
 	// cardinality-enforcement logic.
 	//
 	// A reasonable starting point is $0.05/metric/month, which corresponds
@@ -80,7 +79,7 @@ type Config struct {
 	EstimatedCostPerMetricMonth float64 `mapstructure:"estimated_cost_per_metric_month"`
 
 	// TopOffendersCount is the number of highest-delta (metric, label) pairs
-	// to report via the "processor_top_offenders" gauge. The snapshot is
+	// to report via the "otelcol_processor_cardinality_top_offenders" gauge. The snapshot is
 	// computed once per epoch rotation, so it adds no hot-path cost.
 	//
 	// Set to 0 to disable the Top-N gauge entirely.

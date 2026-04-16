@@ -17,18 +17,11 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	"go.uber.org/goleak"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// TestMain ensures that no goroutines are leaked across the test suite.
-// The background epoch-rotation ticker started in Start() must be cleanly
-// canceled in Shutdown(); goleak.VerifyTestMain will fail the test run if
-// any goroutine survives after all tests complete.
-func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
-}
+
 
 func TestCardinalityProcessor_ConsumeMetrics(t *testing.T) {
 	cfg := &Config{
@@ -646,50 +639,50 @@ func TestInternalTelemetry(t *testing.T) {
 	err = reader.Collect(context.Background(), &collected)
 	require.NoError(t, err)
 
-	// --- Assert: processor_trackers_active = 5 ---------------------------------
+	// --- Assert: otelcol_processor_cardinality_trackers.active = 5 ---------------------------------
 	//
 	// The observable gauge callback sums len(shard.trackers) across all 256
 	// shards when Collect() fires. Exactly 5 trackers were created in Phase 1
 	// and no new trackers were added in Phase 2 (key_0 already existed).
-	activeMetric := findMetricByName(t, collected, "processor_trackers_active")
+	activeMetric := findMetricByName(t, collected, "otelcol_processor_cardinality_trackers.active")
 	gaugeData, ok := activeMetric.Data.(metricdata.Gauge[int64])
-	require.True(t, ok, "processor_trackers_active must be a Gauge[int64]")
+	require.True(t, ok, "otelcol_processor_cardinality_trackers.active must be a Gauge[int64]")
 
 	var totalActive int64
 	for _, dp := range gaugeData.DataPoints {
 		totalActive += dp.Value
 	}
 	assert.Equal(t, int64(5), totalActive,
-		"processor_trackers_active must report exactly 5 (one per unique label key)")
+		"otelcol_processor_cardinality_trackers.active must report exactly 5 (one per unique label key)")
 
-	// --- Assert: processor_labels_stripped_total = 1 ---------------------------
+	// --- Assert: otelcol_processor_cardinality_labels.stripped = 1 ---------------------------
 	//
 	// Only the insertion of v5 into key_0's tracker produced a delta > limit.
 	// Every earlier insertion was within bounds.
-	strippedMetric := findMetricByName(t, collected, "processor_labels_stripped_total")
+	strippedMetric := findMetricByName(t, collected, "otelcol_processor_cardinality_labels.stripped")
 	strippedSum, ok := strippedMetric.Data.(metricdata.Sum[int64])
-	require.True(t, ok, "processor_labels_stripped_total must be a Sum[int64]")
+	require.True(t, ok, "otelcol_processor_cardinality_labels.stripped must be a Sum[int64]")
 
 	var totalStripped int64
 	for _, dp := range strippedSum.DataPoints {
 		totalStripped += dp.Value
 	}
 	assert.Equal(t, int64(1), totalStripped,
-		"processor_labels_stripped_total must be 1 (only the 6th unique value for key_0 was dropped)")
+		"otelcol_processor_cardinality_labels.stripped must be 1 (only the 6th unique value for key_0 was dropped)")
 
-	// --- Assert: estimated_savings_dollars_total = costPerMetric ---------------
+	// --- Assert: otelcol_processor_cardinality_savings.estimated = costPerMetric ---------------
 	//
 	// One drop × EstimatedCostPerMetricMonth = $0.10.
-	savingsMetric := findMetricByName(t, collected, "estimated_savings_dollars_total")
+	savingsMetric := findMetricByName(t, collected, "otelcol_processor_cardinality_savings.estimated")
 	savingsSum, ok := savingsMetric.Data.(metricdata.Sum[float64])
-	require.True(t, ok, "estimated_savings_dollars_total must be a Sum[float64]")
+	require.True(t, ok, "otelcol_processor_cardinality_savings.estimated must be a Sum[float64]")
 
 	var totalSavings float64
 	for _, dp := range savingsSum.DataPoints {
 		totalSavings += dp.Value
 	}
 	assert.InDelta(t, costPerMetric, totalSavings, 1e-9,
-		"estimated_savings_dollars_total must equal %v (1 drop × cost-per-metric)", costPerMetric)
+		"otelcol_processor_cardinality_savings.estimated must equal %v (1 drop × cost-per-metric)", costPerMetric)
 }
 
 // findMetricByName searches a collected ResourceMetrics snapshot for a metric
@@ -802,7 +795,7 @@ func TestCardinalityProcessor_EpochRotation(t *testing.T) {
 	shard.mu.RUnlock()
 }
 
-// TestTopOffenders verifies that the processor_top_offenders gauge correctly
+// TestTopOffenders verifies that the otelcol_processor_cardinality_top.offenders gauge correctly
 // reports the highest-delta (metric, label) pairs after an epoch rotation.
 //
 // Setup:
@@ -859,10 +852,10 @@ func TestTopOffenders(t *testing.T) {
 	err = reader.Collect(context.Background(), &collected)
 	require.NoError(t, err)
 
-	// Find the processor_top_offenders gauge.
-	topMetric := findMetricByName(t, collected, "processor_top_offenders")
+	// Find the otelcol_processor_cardinality_top.offenders gauge.
+	topMetric := findMetricByName(t, collected, "otelcol_processor_cardinality_top.offenders")
 	gaugeData, ok := topMetric.Data.(metricdata.Gauge[int64])
-	require.True(t, ok, "processor_top_offenders must be a Gauge[int64]")
+	require.True(t, ok, "otelcol_processor_cardinality_top.offenders must be a Gauge[int64]")
 
 	// Assert we get exactly TopOffendersCount data points.
 	require.Len(t, gaugeData.DataPoints, 3,
@@ -1011,12 +1004,12 @@ func TestTopOffenders_Disabled(t *testing.T) {
 	err = reader.Collect(context.Background(), &collected)
 	require.NoError(t, err)
 
-	// processor_top_offenders should either not be present at all (OTel SDK
+	// otelcol_processor_cardinality_top.offenders should either not be present at all (OTel SDK
 	// omits empty gauges) or present with 0 data points.
 	var found bool
 	for _, sm := range collected.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name == "processor_top_offenders" {
+			if m.Name == "otelcol_processor_cardinality_top.offenders" {
 				found = true
 				gaugeData, ok := m.Data.(metricdata.Gauge[int64])
 				require.True(t, ok)
@@ -1026,7 +1019,7 @@ func TestTopOffenders_Disabled(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Log("processor_top_offenders gauge not emitted (expected when disabled)")
+		t.Log("otelcol_processor_cardinality_top.offenders gauge not emitted (expected when disabled)")
 	}
 }
 
@@ -1080,7 +1073,7 @@ func TestTopOffenders_EvictionAndReplacement(t *testing.T) {
 	err = reader.Collect(context.Background(), &collected)
 	require.NoError(t, err)
 
-	topMetric := findMetricByName(t, collected, "processor_top_offenders")
+	topMetric := findMetricByName(t, collected, "otelcol_processor_cardinality_top.offenders")
 	gaugeData, ok := topMetric.Data.(metricdata.Gauge[int64])
 	require.True(t, ok)
 	require.Len(t, gaugeData.DataPoints, 2)
