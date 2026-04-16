@@ -10,3 +10,6 @@ ignore:
   - "test/**/*"
   - "examples/**/*"
   - "scripts/**/*"
+  - "cardinalityprocessor/internal/metadata/**/*"
+  - "cardinalityprocessor/internal/metadatatest/**/*"
+  - "cardinalityprocessor/generated_*.go"
