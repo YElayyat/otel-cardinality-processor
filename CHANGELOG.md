@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-04-15
+
+### Added
+- **Demo Environment**: Shipped a fully self-contained "Zero-Friction" observability stack (Collector, Prometheus, Grafana) with automated dashboard provisioning in `examples/prometheus/`.
+- **Quickstart Guide**: Added `QUICKSTART.md` detailing advanced automated multi-service load test commands.
+- Implemented standard OTel `mdatagen` component telemetry generator for completely robust specification alignment.
+
+### Changed
+- **BREAKING CHANGE (Telemetry Metrics)**: Internal telemetry metric names were rigorously migrated to adhere directly to OpenTelemetry Contrib standards (dot-notation format). For example, `processor_labels_stripped_total` is now generated identically as `otelcol_processor_cardinality_labels.stripped`. You must update any internal dashboard definitions or Prometheus alerting queries if you natively relied on the legacy underscore formats.
+
 ## [1.3.1] - 2026-04-13
 
 ### Added
