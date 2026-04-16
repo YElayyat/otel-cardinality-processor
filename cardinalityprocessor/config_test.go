@@ -46,6 +46,73 @@ func TestConfig_Validate(t *testing.T) {
 			},
 			expectedErr: "estimated_cost_per_metric_month cannot be negative",
 		},
+		{
+			name: "invalid top_offenders_count negative",
+			cfg: &Config{
+				MaxCardinalityDeltaPerEpoch: 50,
+				EpochDurationSeconds:        300,
+				TopOffendersCount:           -1,
+			},
+			expectedErr: "top_offenders_count must be between 0 and 500",
+		},
+		{
+			name: "invalid top_offenders_count too large",
+			cfg: &Config{
+				MaxCardinalityDeltaPerEpoch: 50,
+				EpochDurationSeconds:        300,
+				TopOffendersCount:           501,
+			},
+			expectedErr: "top_offenders_count must be between 0 and 500",
+		},
+		{
+			name: "invalid max_tracker_count negative",
+			cfg: &Config{
+				MaxCardinalityDeltaPerEpoch: 50,
+				EpochDurationSeconds:        300,
+				MaxTrackerCount:             -1,
+			},
+			expectedErr: "max_tracker_count must be between 0 and 10,000,000",
+		},
+		{
+			name: "invalid max_tracker_count too large",
+			cfg: &Config{
+				MaxCardinalityDeltaPerEpoch: 50,
+				EpochDurationSeconds:        300,
+				MaxTrackerCount:             10000001,
+			},
+			expectedErr: "max_tracker_count must be between 0 and 10,000,000",
+		},
+		{
+			name: "invalid metric_overrides empty name",
+			cfg: &Config{
+				MaxCardinalityDeltaPerEpoch: 50,
+				EpochDurationSeconds:        300,
+				MetricOverrides: map[string]int{
+					"": 100,
+				},
+			},
+			expectedErr: "metric_overrides contains an empty metric name",
+		},
+		{
+			name: "invalid metric_overrides zero limit",
+			cfg: &Config{
+				MaxCardinalityDeltaPerEpoch: 50,
+				EpochDurationSeconds:        300,
+				MetricOverrides: map[string]int{
+					"http.request": 0,
+				},
+			},
+			expectedErr: "metric_overrides[\"http.request\"] must be greater than 0",
+		},
+		{
+			name: "invalid drop_log_max_per_epoch",
+			cfg: &Config{
+				MaxCardinalityDeltaPerEpoch: 50,
+				EpochDurationSeconds:        300,
+				DropLogMaxPerEpoch:          -1,
+			},
+			expectedErr: "drop_log_max_per_epoch must be >= 0",
+		},
 	}
 
 	for _, tt := range tests {
