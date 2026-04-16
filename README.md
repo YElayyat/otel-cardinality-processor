@@ -140,7 +140,7 @@ Start with tag-only. Always.
 ```mermaid
 flowchart TD
     A[Want to try Cardinality Guardian?] --> B{How do you run OTel Collector?}
-    B -- "Docker / K8s" --> C["docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.3.1"]
+    B -- "Docker / K8s" --> C["docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.4.1"]
     B -- "Custom binary (OCB)" --> D[Add to builder.yaml → ocb --config builder.yaml]
     B -- "otel-collector-contrib" --> E["Coming soon — donation pending"]
     C --> F[Mount your config.yaml]
@@ -188,7 +188,7 @@ receivers:
 
 processors:
   - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.148.0
-  - gomod: github.com/YElayyat/otel-cardinality-processor v1.3.1
+  - gomod: github.com/YElayyat/otel-cardinality-processor v1.4.1
     name: cardinalityprocessor
     import: github.com/YElayyat/otel-cardinality-processor/cardinalityprocessor
 ```
@@ -247,7 +247,7 @@ The official Docker image is automatically built and published to the GitHub Con
 To run the Cardinality Guardian, pull the latest official image:
 
 ```bash
-docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.3.1
+docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.4.1
 ```
 
 *(Optional: You can also build the secure, distroless-like multi-stage Dockerfile manually via `docker build -t ghcr.io/yelayyat/otel-cardinality-processor:latest .`)*
@@ -261,7 +261,7 @@ You must mount your configuration file. By default, the `ENTRYPOINT` expects thi
 docker run --rm \
   -v $(pwd)/examples/otel-collector-config.yaml:/etc/otelcol/config.yaml \
   -p 4317:4317 -p 4318:4318 -p 13133:13133 \
-  ghcr.io/yelayyat/otel-cardinality-processor:v1.3.1
+  ghcr.io/yelayyat/otel-cardinality-processor:v1.4.1
 ```
 
 2. **Verify Health**:
@@ -311,14 +311,14 @@ service:
 ```
 
 #### Step B: Deploy as a Background Service
-Run the container in detached mode (`-d`) and pin to a specific version (e.g., `v1.3.1`) instead of `latest` for stability:
+Run the container in detached mode (`-d`) and pin to a specific version (e.g., `v1.4.1`) instead of `latest` for stability:
 
 ```bash
 docker run -d \
   --name otel-guardian \
   -v $(pwd)/guardian-config.yaml:/etc/otelcol/config.yaml \
   -p 4317:4317 -p 4318:4318 -p 13133:13133 \
-  ghcr.io/yelayyat/otel-cardinality-processor:v1.3.1
+  ghcr.io/yelayyat/otel-cardinality-processor:v1.4.1
 ```
 
 #### Step C: Monitor and Switch

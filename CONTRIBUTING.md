@@ -46,7 +46,7 @@ To catch CI errors (like YAML syntax or tag logic) before pushing, we recommend 
    Create a temporary `.github/test-event.json`:
    ```json
    {
-     "ref": "refs/tags/v1.3.1",
+     "ref": "refs/tags/v1.4.1",
      "ref_type": "tag"
    }
    ```
@@ -61,8 +61,8 @@ Follow these steps for every release to ensure stability and avoid breaking imag
 3. **Simulate**: Test the workflow locally using `act` (see above).
 4. **Tag**:
    ```bash
-   git tag v1.3.1
-   git push origin v1.3.1
+   git tag v1.4.1
+   git push origin v1.4.1
    ```
    **NEVER force-push a tag (`git push -f`).** If a release fails or needs a fix, increment the patch version (e.g., `v1.3.2`) and tag again. Force-pushing tags breaks downstream users and image digests.
 
