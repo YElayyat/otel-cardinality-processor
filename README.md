@@ -141,10 +141,12 @@ Start with tag-only. Always.
 flowchart TD
     A[Want to try Cardinality Guardian?] --> B{How do you run OTel Collector?}
     B -- "Docker / K8s" --> C["docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.4.1"]
+    B -- "Kubernetes / Helm" --> M["Coming soon — Helm chart pending"]
     B -- "Custom binary (OCB)" --> D[Add to builder.yaml → ocb --config builder.yaml]
     B -- "otel-collector-contrib" --> E["Coming soon — donation pending"]
     C --> F[Mount your config.yaml]
     D --> F
+    M --> F
     F --> G{First deployment?}
     G -- Yes --> H["Set tag_only: true"]
     H --> I[Watch processor_top_offenders in Grafana]
