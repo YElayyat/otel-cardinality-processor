@@ -184,3 +184,10 @@ Nothing is stripped. The processor tags overflow data points, and a downstream r
 TSDB receives:    {region="us-east", status="200"}  ← only clean, non-overflow metrics
 Cheap storage:    {region="us-east", status="200", error.type="Lock wait timeout; txn=a3f9c...", otel.metric.overflow: true}  ← full detail preserved for forensics
 ```
+
+**Tag-only mode (`tag_only: true`) without a routing processor:**
+Nothing is stripped and nothing is routed — all data reaches your TSDB, including the high-cardinality labels:
+```
+TSDB receives:    {region="us-east", status="200", error.type="Lock wait timeout; txn=a3f9c...", otel.metric.overflow: true}  ← cardinality explosion still hits TSDB
+```
+Use this only for short-term monitoring of what would be flagged. For TSDB protection, either add a routing processor or switch to `tag_only: false`.

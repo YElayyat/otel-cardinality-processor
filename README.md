@@ -135,6 +135,9 @@ The processor adds `otel.metric.overflow: true` without removing anything. Use t
 
 Start with tag-only. Always.
 
+> [!WARNING]
+> `tag_only: true` does **not** protect your TSDB on its own — high-cardinality labels still reach your backend unchanged. You must pair it with a downstream [routing processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/connector/routingconnector) to split tagged metrics to cheap storage. Without a router, use `tag_only: false` for immediate protection.
+
 ## Deployment Options
 
 ```mermaid
