@@ -58,7 +58,7 @@ You can then add a downstream OTel routing processor that matches on `otel.metri
 
 A recommended rollout sequence:
 
-1. Deploy with `tag_only: true` and monitor the `processor_labels_stripped_total` counter for a few days. This tells you which metrics and labels would be affected.
+1. Deploy with `tag_only: true` and monitor the `processor_labels_stripped_total` counter for a few days. This counter increments in both modes — in tag-only mode it tells you which metrics and labels *would be* stripped under enforcement.
 2. Add the labels you consider essential to `never_drop_labels`.
 3. When the tagged set matches your expectations, flip `tag_only: false` to begin hard enforcement.
 
