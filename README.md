@@ -125,6 +125,9 @@ processors:
 
 The processor strips the offending label. The data point is preserved with remaining labels intact.
 
+> [!CAUTION]
+> **Single-Writer Rule Violation:** Enforcement mode strips attributes, which violates the OTel metrics [single-writer rule](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#single-writer). When multiple data points collapse into the same timeseries identity, backends like Prometheus will interpret the overlapping values as counter resets, producing silently incorrect `rate()` and `increase()` results. This affects all cumulative Sum and Histogram metrics where enforcement fires — regardless of cardinality scale. Use `tag_only: true` with a routing processor for production safety until a downstream spatial reaggregation processor is available.
+
 ### Tag-only
 
 The processor adds `otel.metric.overflow: true` without removing anything. Use this for:

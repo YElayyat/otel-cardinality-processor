@@ -549,6 +549,80 @@ func TestCardinalityProcessor_TagOnlyMode(t *testing.T) {
 	t.Logf("SUCCESS: Kept all 100 user_ids. Tagged %d user_ids for cold storage.", taggedCount)
 }
 
+// TestEnforcementProducesDuplicateIdentities demonstrates the single-writer
+// rule hazard documented in the README. When enforcement mode triggers, it
+// strips high-cardinality attributes from subsequent data points. This test
+// verifies that distinct data points (e.g., different user_ids) collapse into
+// identical timeseries identities after stripping.
+//
+// In a real pipeline, this means the downstream TSDB receives multiple points
+// for the same timeseries in the same batch, which violates the OTel single
+// writer rule and causes issues like phantom counter resets.
+//
+// The theoretical fix is a spatial reaggregation processor placed after
+// Cardinality Guardian to merge these duplicate points (e.g., sum their values).
+func TestEnforcementProducesDuplicateIdentities(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 1, // Tiny limit to trigger enforcement immediately
+		EpochDurationSeconds:        300,
+		TagOnly:                     false, // Enforcement mode
+	}
+
+	next := new(consumertest.MetricsSink)
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	// Send 3 data points for the same metric with different user_ids but identical remaining attributes.
+	// 1st point (user_1): Establishes the tracker and limit.
+	// 2nd point (user_2): Exceeds delta of 1, triggers enforcement (strips user_id).
+	// 3rd point (user_3): Also gets stripped because the label is now blocked.
+	md := pmetric.NewMetrics()
+	rm := md.ResourceMetrics().AppendEmpty()
+	sm := rm.ScopeMetrics().AppendEmpty()
+	m := sm.Metrics().AppendEmpty()
+	m.SetName("api.request")
+	m.SetEmptySum() // Using Sum to illustrate the counter reset problem
+
+	for i := 1; i <= 3; i++ {
+		dp := m.Sum().DataPoints().AppendEmpty()
+		dp.SetIntValue(int64(i * 10))
+		dp.Attributes().PutStr("region", "us-east")
+		dp.Attributes().PutStr("user_id", fmt.Sprintf("user_%d", i))
+	}
+
+	err = proc.ConsumeMetrics(context.Background(), md)
+	require.NoError(t, err)
+
+	outMetrics := next.AllMetrics()
+	require.Len(t, outMetrics, 1)
+
+	outDpList := outMetrics[0].ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0).Sum().DataPoints()
+	require.Equal(t, 3, outDpList.Len())
+
+	// Data point 1 should have user_id intact
+	_, hasUser1 := outDpList.At(0).Attributes().Get("user_id")
+	assert.True(t, hasUser1, "First data point should not be stripped")
+
+	// Data points 2 and 3 should have user_id stripped, leaving them with IDENTICAL attributes
+	dp2Attrs := outDpList.At(1).Attributes()
+	_, hasUser2 := dp2Attrs.Get("user_id")
+	assert.False(t, hasUser2, "Second data point should be stripped")
+
+	dp3Attrs := outDpList.At(2).Attributes()
+	_, hasUser3 := dp3Attrs.Get("user_id")
+	assert.False(t, hasUser3, "Third data point should be stripped")
+
+	// Assert that dp2 and dp3 now have exactly the same attributes (region="us-east")
+	// This proves the single-writer violation: two writers for the same timeseries identity.
+	assert.Equal(t, dp2Attrs.Len(), dp3Attrs.Len())
+	region2, _ := dp2Attrs.Get("region")
+	region3, _ := dp3Attrs.Get("region")
+	assert.Equal(t, region2.AsString(), region3.AsString())
+
+	t.Log("SUCCESS: Demonstrated identity collision when attributes are stripped.")
+}
+
 // TestInternalTelemetry wires the processor to a real OTel SDK ManualReader so
 // that internal instruments (counter, gauge) can be collected and asserted
 // deterministically without relying on a background export interval.
