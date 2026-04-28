@@ -191,3 +191,28 @@ Nothing is stripped and nothing is routed — all data reaches your TSDB, includ
 TSDB receives:    {region="us-east", status="200", error.type="Lock wait timeout; txn=a3f9c...", otel.metric.overflow: true}  ← cardinality explosion still hits TSDB
 ```
 Use this only for short-term monitoring of what would be flagged. For TSDB protection, either add a routing processor or switch to `tag_only: false`.
+
+## 12. Does enforcement mode violate the OTel single-writer rule?
+
+Yes. When Cardinality Guardian strips an attribute in enforcement mode (`tag_only: false`), it violates the [OTel single-writer rule](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#single-writer).
+
+The single-writer rule requires that aggregations of metric streams only be written from a single logical source. When the processor strips a high-cardinality attribute (like `user_id`), multiple distinct data points (e.g., `{method="GET", user_id="alice"}` and `{method="GET", user_id="bob"}`) collapse into the exact same timeseries identity (`{method="GET"}`). 
+
+The backend TSDB now receives multiple points for one series, creating different behaviors based on metric type and backend:
+
+*   **Cumulative Sums & Histograms (Prometheus, Cortex, Mimir):** The backend interprets arriving values out of order or dropping as counter resets. `rate()` and `increase()` queries will be silently incorrect.
+*   **Gauges:** Most TSDBs will implement "last write wins", meaning you get an arbitrary value rather than an average or aggregate.
+*   **Delta Sums:** Some OTLP-native backends can safely sum deltas, making this less severe, but it is still technically a violation.
+
+### Why is `tag_only: true` safe?
+
+`tag_only: true` does **not** violate the single-writer rule, regardless of whether you use a routing processor or not.
+
+*   **With a routing processor:** Tagged metrics are sent to a separate destination (e.g., cheap storage). The TSDB receives only clean metrics. Each destination receives each timeseries identity from exactly one writer.
+*   **Without a routing processor:** The processor adds `otel.metric.overflow=true` to the flagged data points. This creates a *new* timeseries identity. The SDK never produced a data point with that tag, so there is still exactly one writer per identity.
+
+### What is the fix for enforcement mode?
+
+To fix the single-writer violation in enforcement mode, you must pair Cardinality Guardian with a downstream processor capable of performing **spatial reaggregation**—merging data points that share the same identity after attribute removal (e.g., summing counts, merging histogram buckets).
+
+If your pipeline does not currently have a processor capable of performing this data point value merging, **we strongly recommend using `tag_only: true` paired with a routing processor** for production safety.

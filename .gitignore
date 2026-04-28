@@ -40,3 +40,6 @@ build/
 test/benchmark/results/
 *.prof
 .DS_Store
+
+# Internal analysis documents (not for GitHub)
+single_writer_analysis.md
