@@ -5,8 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.4.1] - 2026-04-15
+## [Unreleased / 1.5.0]
 
+### Added
+- **Inline Spatial Reaggregation**: Implemented zero-allocation in-place merging for identical metric identities to resolve the Single-Writer invariant violation caused by stripped attributes.
+- **Enforcement Modes**: Replaced the `tag_only` boolean with a structured `enforcement_mode` enum supporting `tag_only`, `overflow_attribute`, and `strip_and_reaggregate`.
+- **Exemplar Preservation**: Exemplars are now merged and preserved when colliding data points are reaggregated.
+
+### Changed
+- **BREAKING CHANGE (Configuration API)**: The `tag_only: true/false` field has been completely removed. You must update your configuration to use `enforcement_mode: strip_and_reaggregate` (or another mode).
+- **Graceful Fallbacks**: Cumulative Sums and Histograms automatically fall back to `tag_only` mode since their structures cannot be safely reaggregated without persistent state.
+
+## [1.4.1] - 2026-04-15
 ### Fixed
 - Stripped unnecessary OpenTelemetry boilerplate headers from `mdatagen` generated `doc.go` that previously caused pipeline failure against the `godot` configured Linter constraints.
 

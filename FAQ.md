@@ -58,9 +58,9 @@ You can then add a downstream OTel routing processor that matches on `otel.metri
 
 A recommended rollout sequence:
 
-1. Deploy with `tag_only: true` and monitor the `processor_labels_stripped_total` counter for a few days. This counter increments in both modes — in tag-only mode it tells you which metrics and labels *would be* stripped under enforcement.
+1. Deploy with `enforcement_mode: tag_only` and monitor the `processor_labels_stripped_total` counter for a few days. This counter increments in all modes — in tag-only mode it tells you which metrics and labels *would be* stripped under enforcement.
 2. Add the labels you consider essential to `never_drop_labels`.
-3. When the tagged set matches your expectations, flip `tag_only: false` to begin hard enforcement.
+3. When the tagged set matches your expectations, switch to `enforcement_mode: strip_and_reaggregate` or `enforcement_mode: overflow_attribute`.
 
 ---
 
@@ -194,25 +194,29 @@ Use this only for short-term monitoring of what would be flagged. For TSDB prote
 
 ## 12. Does enforcement mode violate the OTel single-writer rule?
 
-Yes. When Cardinality Guardian strips an attribute in enforcement mode (`tag_only: false`), it violates the [OTel single-writer rule](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#single-writer).
+It depends on the enforcement mode.
 
-The single-writer rule requires that aggregations of metric streams only be written from a single logical source. When the processor strips a high-cardinality attribute (like `user_id`), multiple distinct data points (e.g., `{method="GET", user_id="alice"}` and `{method="GET", user_id="bob"}`) collapse into the exact same timeseries identity (`{method="GET"}`). 
+**`enforcement_mode: strip_and_reaggregate`** performs **inline spatial reaggregation** to resolve the Single-Writer violation for supported metric types. When the processor strips a high-cardinality attribute, it detects identity collisions and merges the colliding data points:
 
-The backend TSDB now receives multiple points for one series, creating different behaviors based on metric type and backend:
+*   **Delta Sums:** Values are summed. ✅ No violation.
+*   **Gauges:** Latest-timestamp value is kept. ✅ No violation.
+*   **Cumulative Sums, Histograms, ExponentialHistograms:** Falls back to `tag_only` behavior (injects `otel.metric.overflow` tag). ✅ No violation (unsupported types are never stripped).
 
-*   **Cumulative Sums & Histograms (Prometheus, Cortex, Mimir):** The backend interprets arriving values out of order or dropping as counter resets. `rate()` and `increase()` queries will be silently incorrect.
-*   **Gauges:** Most TSDBs will implement "last write wins", meaning you get an arbitrary value rather than an average or aggregate.
-*   **Delta Sums:** Some OTLP-native backends can safely sum deltas, making this less severe, but it is still technically a violation.
+**`enforcement_mode: overflow_attribute`** replaces the high-cardinality value with a sentinel `otel.cardinality_overflow` string. All overflow data points for a given `(metric, attribute_key)` share one identity. ✅ No violation.
 
-### Why is `tag_only: true` safe?
+**`enforcement_mode: tag_only`** adds a routing tag without modifying any attributes. ✅ No violation.
 
-`tag_only: true` does **not** violate the single-writer rule, regardless of whether you use a routing processor or not.
+### Why is `tag_only` safe?
+
+`tag_only` does **not** violate the single-writer rule, regardless of whether you use a routing processor or not.
 
 *   **With a routing processor:** Tagged metrics are sent to a separate destination (e.g., cheap storage). The TSDB receives only clean metrics. Each destination receives each timeseries identity from exactly one writer.
 *   **Without a routing processor:** The processor adds `otel.metric.overflow=true` to the flagged data points. This creates a *new* timeseries identity. The SDK never produced a data point with that tag, so there is still exactly one writer per identity.
 
-### What is the fix for enforcement mode?
+### Summary of mode safety
 
-To fix the single-writer violation in enforcement mode, you must pair Cardinality Guardian with a downstream processor capable of performing **spatial reaggregation**—merging data points that share the same identity after attribute removal (e.g., summing counts, merging histogram buckets).
-
-If your pipeline does not currently have a processor capable of performing this data point value merging, **we strongly recommend using `tag_only: true` paired with a routing processor** for production safety.
+| Mode | Single-Writer Safe? | Notes |
+|---|---|---|
+| `tag_only` | ✅ Always | No data mutation |
+| `overflow_attribute` | ✅ Always | All overflow shares one identity |
+| `strip_and_reaggregate` | ✅ For Delta Sum + Gauge | Unsupported types fall back to `tag_only` |

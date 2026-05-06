@@ -18,7 +18,7 @@ processors:
   cardinality_guardian:
     max_cardinality_delta_per_epoch: 100
     epoch_duration_seconds: 300
-    tag_only: true
+    enforcement_mode: tag_only  # or: overflow_attribute, strip_and_reaggregate
 ```
 
 ## What it does
@@ -43,9 +43,10 @@ flowchart LR
     C --> D[For each label: hash value, insert into HLL++ sketch]
     D --> E{Delta > threshold?}
     E -- No --> F[Pass through]
-    E -- Yes --> G{tag_only?}
-    G -- Yes --> H[Add otel.metric.overflow tag]
-    G -- No --> I[Strip label]
+    E -- Yes --> G{enforcement_mode?}
+    G -- tag_only --> H[Add otel.metric.overflow tag]
+    G -- overflow_attribute --> OA[Replace value with sentinel]
+    G -- strip_and_reaggregate --> I[Strip label + merge collisions]
 ```
 
 Key design decisions:
@@ -81,8 +82,11 @@ processors:
     # Epoch rotation interval (seconds, minimum 10)
     epoch_duration_seconds: 300
 
-    # true = tag only (add otel.metric.overflow), false = strip the label
-    tag_only: true
+    # Enforcement mode (replaces deprecated tag_only boolean):
+    #   tag_only              - add otel.metric.overflow tag (safest, recommended for initial deployment)
+    #   overflow_attribute    - replace overflowing value with "otel.cardinality_overflow" sentinel
+    #   strip_and_reaggregate - strip the label and merge colliding data points inline
+    enforcement_mode: tag_only
 
     # Labels that are never stripped regardless of cardinality
     never_drop_labels:
@@ -121,14 +125,11 @@ processors:
 
 ## Operation modes
 
-### Enforcement (default)
+### Tag-only (recommended for initial deployment)
 
-The processor strips the offending label. The data point is preserved with remaining labels intact.
-
-> [!CAUTION]
-> **Single-Writer Rule Violation:** Enforcement mode strips attributes, which violates the OTel metrics [single-writer rule](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#single-writer). When multiple data points collapse into the same timeseries identity, backends like Prometheus will interpret the overlapping values as counter resets, producing silently incorrect `rate()` and `increase()` results. This affects all cumulative Sum and Histogram metrics where enforcement fires — regardless of cardinality scale. Use `tag_only: true` with a routing processor for production safety until a downstream spatial reaggregation processor is available.
-
-### Tag-only
+```yaml
+enforcement_mode: tag_only
+```
 
 The processor adds `otel.metric.overflow: true` without removing anything. Use this for:
 
@@ -139,7 +140,38 @@ The processor adds `otel.metric.overflow: true` without removing anything. Use t
 Start with tag-only. Always.
 
 > [!WARNING]
-> `tag_only: true` does **not** protect your TSDB on its own — high-cardinality labels still reach your backend unchanged. You must pair it with a downstream [routing processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/connector/routingconnector) to split tagged metrics to cheap storage.
+> `enforcement_mode: tag_only` does **not** protect your TSDB on its own — high-cardinality labels still reach your backend unchanged. You must pair it with a downstream [routing processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/connector/routingconnector) to split tagged metrics to cheap storage.
+
+### Overflow Attribute
+
+```yaml
+enforcement_mode: overflow_attribute
+```
+
+Replaces the high-cardinality attribute **value** with the sentinel string `otel.cardinality_overflow`. The attribute key remains — only the value changes. All overflowed data points for a given `(metric, attribute_key)` merge into a single overflow identity.
+
+This is the OTel-SDK-spec-aligned approach and avoids the Single-Writer violation because every overflow data point shares the same identity `{user_id="otel.cardinality_overflow"}`.
+
+### Strip and Reaggregate
+
+```yaml
+enforcement_mode: strip_and_reaggregate
+```
+
+Removes the offending label and performs **inline spatial reaggregation** to merge data points that now share the same identity. This resolves the Single-Writer violation that naive attribute stripping would cause.
+
+**Supported metric types:**
+
+| Metric Type | Merge Strategy | Status |
+|---|---|---|
+| **Gauge** | Last-value-wins (latest timestamp) | ✅ Supported |
+| **Delta Sum** | Additive (sum values) | ✅ Supported |
+| **Cumulative Sum** | Falls back to `tag_only` | ⏳ Coming soon |
+| **Histogram** | Falls back to `tag_only` | ⏳ Coming soon |
+| **ExponentialHistogram** | Falls back to `tag_only` | ⏳ Coming soon |
+
+> [!TIP]
+> For metric types that don't yet support reaggregation (Cumulative Sums, Histograms), the processor automatically falls back to `tag_only` behavior with an `otel.metric.overflow` tag, ensuring no data corruption. Use `enforcement_mode: tag_only` or `enforcement_mode: overflow_attribute` for full coverage of all metric types.
 
 ## Deployment Options
 
@@ -154,12 +186,12 @@ flowchart TD
     D --> F
     M --> F
     F --> G{First deployment?}
-    G -- Yes --> H["Set tag_only: true"]
+    G -- Yes --> H["Set enforcement_mode: tag_only"]
     H --> I[Watch processor_top_offenders in Grafana]
     I --> J{Tune thresholds?}
     J -- Yes --> K[Add metric_overrides / never_drop_labels]
     K --> I
-    J -- No --> L["Switch to tag_only: false → Production"]
+    J -- No --> L["Switch to enforcement_mode: strip_and_reaggregate → Production"]
     G -- No --> L
 ```
 

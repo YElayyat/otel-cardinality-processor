@@ -14,7 +14,11 @@ processors:
       - region
       - http.status_code
       - service.name
-    tag_only: false
+    # Enforcement mode:
+    #   tag_only              - add otel.metric.overflow tag only (safest)
+    #   overflow_attribute    - replace value with sentinel string
+    #   strip_and_reaggregate - strip + merge collisions inline (default)
+    enforcement_mode: strip_and_reaggregate
     estimated_cost_per_metric_month: 0.05
     top_offenders_count: 10
     max_tracker_count: 0
