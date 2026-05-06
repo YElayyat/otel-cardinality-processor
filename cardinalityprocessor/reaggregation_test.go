@@ -131,6 +131,29 @@ func TestReaggregateGauge_ThreeWayCollision(t *testing.T) {
 	assert.Equal(t, pcommon.Timestamp(300), dps.At(0).Timestamp())
 }
 
+func TestReaggregateGauge_IntValues(t *testing.T) {
+	dps := pmetric.NewNumberDataPointSlice()
+
+	dp1 := dps.AppendEmpty()
+	dp1.Attributes().PutStr("method", "GET")
+	dp1.SetIntValue(10)
+	dp1.SetTimestamp(100)
+	dp1.SetStartTimestamp(50)
+
+	dp2 := dps.AppendEmpty()
+	dp2.Attributes().PutStr("method", "GET")
+	dp2.SetIntValue(20)
+	dp2.SetTimestamp(200) // latest wins
+	dp2.SetStartTimestamp(150) // > 0, so it should be copied
+
+	reaggregateNumberDataPoints(dps, pmetric.MetricTypeGauge, false)
+
+	require.Equal(t, 1, dps.Len())
+	assert.Equal(t, int64(20), dps.At(0).IntValue())
+	assert.Equal(t, pcommon.Timestamp(200), dps.At(0).Timestamp())
+	assert.Equal(t, pcommon.Timestamp(150), dps.At(0).StartTimestamp())
+}
+
 // Delta Sum reaggregation tests.
 
 func TestReaggregateDeltaSum_NoCollision(t *testing.T) {
@@ -379,6 +402,16 @@ func TestAddNumberValue_IntPlusDouble(t *testing.T) {
 
 	addNumberValue(src, dst)
 	assert.InDelta(t, 5.5, dst.DoubleValue(), 0.001)
+}
+
+func TestAddNumberValue_EmptyType(t *testing.T) {
+	dps := pmetric.NewNumberDataPointSlice()
+	src := dps.AppendEmpty() // Empty value type
+	dst := dps.AppendEmpty() // Empty value type
+
+	addNumberValue(src, dst)
+	// Promotes to double because types are not explicitly Int or Double, but evaluates to 0.0 + 0.0
+	assert.InDelta(t, 0.0, dst.DoubleValue(), 0.001)
 }
 
 // Benchmarks.

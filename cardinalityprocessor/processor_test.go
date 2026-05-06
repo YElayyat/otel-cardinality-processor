@@ -1554,6 +1554,149 @@ func TestCumulativeSumFallsBackToTagOnly(t *testing.T) {
 	t.Logf("SUCCESS: Cumulative Sum fell back to tag_only. %d/%d tagged.", taggedCount, outDpList.Len())
 }
 
+// TestUnsupportedMetricTypesFallBackToTagOnly verifies that Histogram,
+// ExponentialHistogram, and Summary metrics fall back to tag_only behavior.
+func TestUnsupportedMetricTypesFallBackToTagOnly(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 1,
+		EpochDurationSeconds:        300,
+		EnforcementMode:             EnforcementStripAndReaggregate,
+	}
+
+	next := new(consumertest.MetricsSink)
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	md := pmetric.NewMetrics()
+	rm := md.ResourceMetrics().AppendEmpty()
+	sm := rm.ScopeMetrics().AppendEmpty()
+
+	// 1. Histogram
+	mHist := sm.Metrics().AppendEmpty()
+	mHist.SetName("api.request.histogram")
+	hist := mHist.SetEmptyHistogram()
+	for i := 1; i <= 3; i++ {
+		dp := hist.DataPoints().AppendEmpty()
+		dp.Attributes().PutStr("user_id", fmt.Sprintf("hist_user_%d", i))
+	}
+
+	// 2. Exponential Histogram
+	mExp := sm.Metrics().AppendEmpty()
+	mExp.SetName("api.request.exphist")
+	exp := mExp.SetEmptyExponentialHistogram()
+	for i := 1; i <= 3; i++ {
+		dp := exp.DataPoints().AppendEmpty()
+		dp.Attributes().PutStr("user_id", fmt.Sprintf("exp_user_%d", i))
+	}
+
+	// 3. Summary
+	mSumm := sm.Metrics().AppendEmpty()
+	mSumm.SetName("api.request.summary")
+	summ := mSumm.SetEmptySummary()
+	for i := 1; i <= 3; i++ {
+		dp := summ.DataPoints().AppendEmpty()
+		dp.Attributes().PutStr("user_id", fmt.Sprintf("summ_user_%d", i))
+	}
+
+	err = proc.ConsumeMetrics(context.Background(), md)
+	require.NoError(t, err)
+
+	outMetrics := next.AllMetrics()
+	require.Len(t, outMetrics, 1)
+
+	metrics := outMetrics[0].ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics()
+	require.Equal(t, 3, metrics.Len())
+
+	// Helper to check tags manually since we can't easily use interfaces for concrete types.
+	
+	histDps := metrics.At(0).Histogram().DataPoints()
+	histTagged := 0
+	for i := 0; i < histDps.Len(); i++ {
+		if _, hasTag := histDps.At(i).Attributes().Get("otel.metric.overflow"); hasTag { histTagged++ }
+	}
+	assert.Greater(t, histTagged, 0)
+
+	expDps := metrics.At(1).ExponentialHistogram().DataPoints()
+	expTagged := 0
+	for i := 0; i < expDps.Len(); i++ {
+		if _, hasTag := expDps.At(i).Attributes().Get("otel.metric.overflow"); hasTag { expTagged++ }
+	}
+	assert.Greater(t, expTagged, 0)
+
+	summDps := metrics.At(2).Summary().DataPoints()
+	summTagged := 0
+	for i := 0; i < summDps.Len(); i++ {
+		if _, hasTag := summDps.At(i).Attributes().Get("otel.metric.overflow"); hasTag { summTagged++ }
+	}
+	assert.Greater(t, summTagged, 0)
+}
+
+// TestProcessHistogramTypes verifies that Histogram, ExponentialHistogram,
+// and Summary metrics are properly processed when not using strip_and_reaggregate.
+func TestProcessHistogramTypes(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 1,
+		EpochDurationSeconds:        300,
+		EnforcementMode:             EnforcementOverflowAttribute,
+	}
+
+	next := new(consumertest.MetricsSink)
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	md := pmetric.NewMetrics()
+	rm := md.ResourceMetrics().AppendEmpty()
+	sm := rm.ScopeMetrics().AppendEmpty()
+
+	mHist := sm.Metrics().AppendEmpty()
+	mHist.SetName("api.request.histogram")
+	hist := mHist.SetEmptyHistogram()
+	for i := 1; i <= 3; i++ {
+		dp := hist.DataPoints().AppendEmpty()
+		dp.Attributes().PutStr("user_id", fmt.Sprintf("hist_user_%d", i))
+	}
+
+	mExp := sm.Metrics().AppendEmpty()
+	mExp.SetName("api.request.exphist")
+	exp := mExp.SetEmptyExponentialHistogram()
+	for i := 1; i <= 3; i++ {
+		dp := exp.DataPoints().AppendEmpty()
+		dp.Attributes().PutStr("user_id", fmt.Sprintf("exp_user_%d", i))
+	}
+
+	mSumm := sm.Metrics().AppendEmpty()
+	mSumm.SetName("api.request.summary")
+	summ := mSumm.SetEmptySummary()
+	for i := 1; i <= 3; i++ {
+		dp := summ.DataPoints().AppendEmpty()
+		dp.Attributes().PutStr("user_id", fmt.Sprintf("summ_user_%d", i))
+	}
+
+	err = proc.ConsumeMetrics(context.Background(), md)
+	require.NoError(t, err)
+
+	outMetrics := next.AllMetrics()
+	require.Len(t, outMetrics, 1)
+
+	metrics := outMetrics[0].ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics()
+	require.Equal(t, 3, metrics.Len())
+
+	// Verify the attributes were modified according to EnforcementOverflowAttribute
+	histDps := metrics.At(0).Histogram().DataPoints()
+	v, _ := histDps.At(1).Attributes().Get("user_id")
+	assert.Equal(t, "otel.cardinality_overflow", v.Str())
+
+	expDps := metrics.At(1).ExponentialHistogram().DataPoints()
+	v, _ = expDps.At(1).Attributes().Get("user_id")
+	assert.Equal(t, "otel.cardinality_overflow", v.Str())
+
+	summDps := metrics.At(2).Summary().DataPoints()
+	v, _ = summDps.At(1).Attributes().Get("user_id")
+	assert.Equal(t, "otel.cardinality_overflow", v.Str())
+}
+
 // TestEnforcementModeValidation verifies that invalid enforcement_mode values
 // are rejected during config validation.
 func TestEnforcementModeValidation(t *testing.T) {
