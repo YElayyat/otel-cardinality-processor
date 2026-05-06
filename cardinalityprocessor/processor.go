@@ -359,9 +359,10 @@ type cardinalityProcessor struct {
 	// guarantees single-call semantics, but the guard is cheap insurance).
 	startOnce sync.Once
 
-	// tagOnly mirrors Config.TagOnly and is captured directly on the struct to
-	// avoid an extra pointer dereference into the Config on every data point.
-	tagOnly bool
+	// enforcementMode mirrors Config.ResolvedEnforcementMode() and is captured
+	// directly on the struct to avoid an extra pointer dereference + method call
+	// into the Config on every data point.
+	enforcementMode EnforcementMode
 
 	// estimatedCostPerMetricMonth mirrors Config.EstimatedCostPerMetricMonth for
 	// the same reason: it is read on every attribute that exceeds the limit and
@@ -421,7 +422,7 @@ func newCardinalityProcessor(ctx context.Context, cfg *Config, set processor.Set
 		seed:                        maphash.MakeSeed(),
 		ctx:                         childCtx,
 		cancel:                      cancel,
-		tagOnly:                     cfg.TagOnly,
+		enforcementMode:             cfg.ResolvedEnforcementMode(),
 		estimatedCostPerMetricMonth: cfg.EstimatedCostPerMetricMonth,
 	}
 
@@ -541,19 +542,49 @@ func (p *cardinalityProcessor) ConsumeMetrics(ctx context.Context, md pmetric.Me
 // handler based on its type. All five OpenTelemetry metric types (Gauge, Sum,
 // Histogram, ExponentialHistogram, and Summary) are fully supported, and
 // attribute cardinality limits are enforced on all of their data points.
+//
+// When enforcement mode is strip_and_reaggregate, inline spatial reaggregation
+// is performed after attribute stripping for supported metric types (Delta Sum
+// and Gauge). Unsupported metric types (Cumulative Sum, Histogram,
+// ExponentialHistogram, Summary) fall back to tag_only behavior.
 func (p *cardinalityProcessor) processMetric(m pmetric.Metric) {
-
 	switch m.Type() {
 	case pmetric.MetricTypeGauge:
 		p.processNumberDataPoints(m.Name(), m.Gauge().DataPoints())
+		if p.enforcementMode == EnforcementStripAndReaggregate {
+			reaggregateNumberDataPoints(m.Gauge().DataPoints(), pmetric.MetricTypeGauge, false)
+		}
 	case pmetric.MetricTypeSum:
-		p.processNumberDataPoints(m.Name(), m.Sum().DataPoints())
+		isDelta := m.Sum().AggregationTemporality() == pmetric.AggregationTemporalityDelta
+		if p.enforcementMode == EnforcementStripAndReaggregate && !isDelta {
+			// Cumulative Sums are not yet supported for reaggregation.
+			// Fall back to tag_only behavior for this specific metric.
+			p.processNumberDataPointsWithMode(m.Name(), m.Sum().DataPoints(), EnforcementTagOnly)
+		} else {
+			p.processNumberDataPoints(m.Name(), m.Sum().DataPoints())
+			if p.enforcementMode == EnforcementStripAndReaggregate && isDelta {
+				reaggregateNumberDataPoints(m.Sum().DataPoints(), pmetric.MetricTypeSum, true)
+			}
+		}
 	case pmetric.MetricTypeHistogram:
-		p.processHistogramDataPoints(m.Name(), m.Histogram().DataPoints())
+		if p.enforcementMode == EnforcementStripAndReaggregate {
+			// Histograms are not yet supported for reaggregation.
+			p.processHistogramDataPointsWithMode(m.Name(), m.Histogram().DataPoints(), EnforcementTagOnly)
+		} else {
+			p.processHistogramDataPoints(m.Name(), m.Histogram().DataPoints())
+		}
 	case pmetric.MetricTypeExponentialHistogram:
-		p.processExponentialHistogramDataPoints(m.Name(), m.ExponentialHistogram().DataPoints())
+		if p.enforcementMode == EnforcementStripAndReaggregate {
+			p.processExponentialHistogramDataPointsWithMode(m.Name(), m.ExponentialHistogram().DataPoints(), EnforcementTagOnly)
+		} else {
+			p.processExponentialHistogramDataPoints(m.Name(), m.ExponentialHistogram().DataPoints())
+		}
 	case pmetric.MetricTypeSummary:
-		p.processSummaryDataPoints(m.Name(), m.Summary().DataPoints())
+		if p.enforcementMode == EnforcementStripAndReaggregate {
+			p.processSummaryDataPointsWithMode(m.Name(), m.Summary().DataPoints(), EnforcementTagOnly)
+		} else {
+			p.processSummaryDataPoints(m.Name(), m.Summary().DataPoints())
+		}
 	}
 }
 
@@ -594,33 +625,34 @@ func (p *cardinalityProcessor) processSummaryDataPoints(metricName string, dps p
 // attribute on a single data point and applies the cardinality decision from
 // shouldDrop to each one.
 //
-// TagOnly dual-route logic:
+// The behavior depends on the effective enforcement mode:
 //
-// When Config.TagOnly is true the processor must not delete any attribute — it
-// must instead inject an "otel.metric.overflow=true" boolean attribute.
-// The injection cannot happen inside the RemoveIf callback because pdata's
-// KeyValueList backing slice may be reallocated by a PutBool call while
-// RemoveIf still holds its internal cursor, producing undefined behavior.
-// The solution is a local `shouldTag` bool that the closure sets to true when
-// it decides to tag (and returns false to prevent deletion). After RemoveIf
-// returns the tag is applied in a single, safe PutBool call.
+//   - tag_only: preserves all attributes and injects "otel.metric.overflow=true".
+//   - overflow_attribute: replaces the high-cardinality attribute value with
+//     the sentinel "otel.cardinality_overflow" string.
+//   - strip_and_reaggregate: removes the attribute (reaggregation happens
+//     at the processMetric level after all data points are processed).
 //
-// Allocation note: The closure passed to RemoveIf already escapes to the heap
-// (RemoveIf is an interface-level call). Capturing `shouldTag` by reference
-// widens the existing closure struct by one bool with zero additional heap
-// allocations.
+// The injection/replacement cannot happen inside the RemoveIf callback because
+// pdata's KeyValueList backing slice may be reallocated by a PutBool/PutStr
+// call while RemoveIf still holds its internal cursor, producing undefined
+// behavior. Post-iteration mutations are deferred.
 func (p *cardinalityProcessor) handleAttributes(metricName string, attrs pcommon.Map) {
-	// shouldTag is set inside the RemoveIf callback when tagOnly mode decides
-	// that an attribute must be tagged rather than removed. The actual PutBool
-	// call is deferred until after RemoveIf completes — mutating the map
-	// while RemoveIf is iterating it is undefined behavior in pdata (the
-	// backing KeyValueList slice could be modified mid-scan).
-	// This local bool is captured by the closure below; the closure is already
-	// heap-allocated (it escapes into RemoveIf), so capturing one extra bool
-	// increases the existing closure struct size with zero additional allocations.
+	p.handleAttributesWithMode(metricName, attrs, p.enforcementMode)
+}
+
+// handleAttributesWithMode is the mode-parameterized version of handleAttributes.
+// It allows callers (like processMetric) to override the enforcement mode for
+// specific metric types that don't support reaggregation.
+func (p *cardinalityProcessor) handleAttributesWithMode(metricName string, attrs pcommon.Map, mode EnforcementMode) {
+	// shouldTag is set when tag_only mode decides an attribute should be tagged.
+	// overflowKeys collects keys whose values should be replaced with the sentinel.
+	// Both are deferred until after RemoveIf completes to avoid mutating the map
+	// while iterating.
 	shouldTag := false
+	var overflowKeys []string
+
 	attrs.RemoveIf(func(k string, v pcommon.Value) bool {
-		// Guard: check the protected set before calling v.AsString().
 		if p.isProtected(k) {
 			return false
 		}
@@ -628,28 +660,70 @@ func (p *cardinalityProcessor) handleAttributes(metricName string, attrs pcommon
 		if p.shouldDrop(metricName, k, v.AsString()) {
 			p.labelsStripped.Add(1)
 
-			if p.tagOnly {
+			switch mode {
+			case EnforcementTagOnly:
 				// DUAL-ROUTE MODE: record the decision, keep the attribute.
 				shouldTag = true
 				return false
-			}
 
-			// NORMAL MODE: log and signal RemoveIf to delete this attribute.
-			p.dropsThisEpoch.Add(1)
-			if maxLog := p.config.DropLogMaxPerEpoch; maxLog == 0 || p.dropLogCount.Add(1) <= int64(maxLog) {
-				p.logger.Warn("Dropping high-cardinality attribute",
-					zap.String("metric", metricName),
-					zap.String("key", k))
+			case EnforcementOverflowAttribute:
+				// OVERFLOW MODE: defer value replacement until after iteration.
+				overflowKeys = append(overflowKeys, k)
+				return false
+
+			case EnforcementStripAndReaggregate:
+				// STRIP MODE: log and signal RemoveIf to delete this attribute.
+				p.dropsThisEpoch.Add(1)
+				if maxLog := p.config.DropLogMaxPerEpoch; maxLog == 0 || p.dropLogCount.Add(1) <= int64(maxLog) {
+					p.logger.Warn("Dropping high-cardinality attribute",
+						zap.String("metric", metricName),
+						zap.String("key", k))
+				}
+				return true
 			}
-			return true
 		}
 		return false
 	})
 
-	// Apply the routing tag only after iteration is complete so that
-	// pcommon.Map is never modified while RemoveIf holds its internal cursor.
+	// Apply deferred mutations after iteration is complete.
 	if shouldTag {
 		attrs.PutBool("otel.metric.overflow", true)
+	}
+	for _, k := range overflowKeys {
+		attrs.PutStr(k, overflowSentinel)
+	}
+}
+
+// processNumberDataPointsWithMode processes data points with an overridden
+// enforcement mode. Used when the metric type doesn't support the configured
+// mode (e.g., Cumulative Sums falling back to tag_only).
+func (p *cardinalityProcessor) processNumberDataPointsWithMode(metricName string, dps pmetric.NumberDataPointSlice, mode EnforcementMode) {
+	for i := 0; i < dps.Len(); i++ {
+		p.handleAttributesWithMode(metricName, dps.At(i).Attributes(), mode)
+	}
+}
+
+// processHistogramDataPointsWithMode processes histogram data points with an
+// overridden enforcement mode.
+func (p *cardinalityProcessor) processHistogramDataPointsWithMode(metricName string, dps pmetric.HistogramDataPointSlice, mode EnforcementMode) {
+	for i := 0; i < dps.Len(); i++ {
+		p.handleAttributesWithMode(metricName, dps.At(i).Attributes(), mode)
+	}
+}
+
+// processExponentialHistogramDataPointsWithMode processes exponential histogram
+// data points with an overridden enforcement mode.
+func (p *cardinalityProcessor) processExponentialHistogramDataPointsWithMode(metricName string, dps pmetric.ExponentialHistogramDataPointSlice, mode EnforcementMode) {
+	for i := 0; i < dps.Len(); i++ {
+		p.handleAttributesWithMode(metricName, dps.At(i).Attributes(), mode)
+	}
+}
+
+// processSummaryDataPointsWithMode processes summary data points with an
+// overridden enforcement mode.
+func (p *cardinalityProcessor) processSummaryDataPointsWithMode(metricName string, dps pmetric.SummaryDataPointSlice, mode EnforcementMode) {
+	for i := 0; i < dps.Len(); i++ {
+		p.handleAttributesWithMode(metricName, dps.At(i).Attributes(), mode)
 	}
 }
 

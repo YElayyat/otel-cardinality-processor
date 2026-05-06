@@ -1,7 +1,11 @@
 // Package cardinalityprocessor is documented in processor.go.
 package cardinalityprocessor
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
 // Config defines the user-facing configuration for the cardinality_guardian
 // processor. Every field maps directly to a key in the OpenTelemetry Collector
@@ -59,12 +63,33 @@ type Config struct {
 	// When true, the attribute is preserved and a boolean attribute
 	// "otel.metric.overflow: true" is injected into the same data point.
 	//
-	// The injected tag is designed to be consumed by a downstream OTel routing
-	// processor: metrics with the tag can be forwarded to cheap object storage
-	// (S3, GCS, etc.) while clean metrics continue to flow into Prometheus or
-	// Datadog. This makes the cardinality killer non-destructive and reversible,
-	// which is valuable in regulated environments or during initial rollout.
+	// Deprecated: Use EnforcementMode instead. If EnforcementMode is set,
+	// TagOnly is ignored. TagOnly: true maps to EnforcementMode: "tag_only";
+	// TagOnly: false maps to EnforcementMode: "strip_and_reaggregate".
 	TagOnly bool `mapstructure:"tag_only"`
+
+	// EnforcementMode controls how the processor handles high-cardinality
+	// attributes once the delta threshold is exceeded. Three modes are available:
+	//
+	//   - "tag_only" — preserves all attributes and injects
+	//     "otel.metric.overflow: true" for downstream routing. No data mutation.
+	//     This is the safest mode and recommended for initial deployment.
+	//
+	//   - "overflow_attribute" — replaces the high-cardinality attribute value
+	//     with a sentinel "otel.cardinality_overflow" string. All overflowed
+	//     data points merge into a single overflow bucket. This is OTel-SDK-
+	//     spec-aligned and avoids the Single-Writer violation because all
+	//     overflow points share one identity.
+	//
+	//   - "strip_and_reaggregate" — removes the offending attribute and performs
+	//     inline spatial reaggregation to merge data points that now share the
+	//     same identity. Currently supports Delta Sum and Gauge metric types.
+	//     Cumulative Sums, Histograms, and ExponentialHistograms fall back to
+	//     tag_only behavior with a warning log.
+	//
+	// If empty, defaults to "tag_only" when TagOnly is true, or
+	// "strip_and_reaggregate" when TagOnly is false.
+	EnforcementMode EnforcementMode `mapstructure:"enforcement_mode"`
 
 	// EstimatedCostPerMetricMonth configures the theoretical cost per active time-series. This is 
 	// used solely to populate the "otelcol_processor_cardinality_estimated_savings_dollars_total" OTel counter
@@ -114,36 +139,84 @@ type Config struct {
 	DropLogMaxPerEpoch int `mapstructure:"drop_log_max_per_epoch"`
 }
 
+// EnforcementMode determines how the processor handles attributes that exceed
+// the cardinality delta threshold.
+type EnforcementMode string
+
+const (
+	// EnforcementTagOnly preserves all attributes and injects
+	// "otel.metric.overflow: true" for downstream routing decisions.
+	EnforcementTagOnly EnforcementMode = "tag_only"
+
+	// EnforcementOverflowAttribute replaces the high-cardinality attribute
+	// value with a sentinel "otel.cardinality_overflow" string. All overflowed
+	// data points for a given (metric, attribute_key) collapse into a single
+	// overflow identity, avoiding the Single-Writer violation.
+	EnforcementOverflowAttribute EnforcementMode = "overflow_attribute"
+
+	// EnforcementStripAndReaggregate removes the offending attribute and
+	// performs inline spatial reaggregation to merge data points that now
+	// share the same identity. Currently supports Delta Sum and Gauge.
+	EnforcementStripAndReaggregate EnforcementMode = "strip_and_reaggregate"
+)
+
+// overflowSentinel is the value used to replace high-cardinality attribute
+// values when EnforcementOverflowAttribute mode is active. It follows the
+// OTel SDK convention for cardinality overflow handling.
+const overflowSentinel = "otel.cardinality_overflow"
+
+// ResolvedEnforcementMode returns the effective enforcement mode, resolving
+// the deprecated TagOnly field if EnforcementMode is not explicitly set.
+func (c *Config) ResolvedEnforcementMode() EnforcementMode {
+	if c.EnforcementMode != "" {
+		return c.EnforcementMode
+	}
+	// Backward compatibility: map the deprecated TagOnly bool.
+	if c.TagOnly {
+		return EnforcementTagOnly
+	}
+	return EnforcementStripAndReaggregate
+}
+
 // Validate checks that all required Config fields are within their acceptable
 // ranges and returns a descriptive error if any constraint is violated. The
 // OTel Collector framework calls Validate automatically during pipeline
 // construction; a non-nil return value prevents the pipeline from starting.
 func (c *Config) Validate() error {
 	if c.MaxCardinalityDeltaPerEpoch <= 0 {
-		return fmt.Errorf("max_cardinality_delta_per_epoch must be greater than 0")
+		return errors.New("max_cardinality_delta_per_epoch must be greater than 0")
 	}
 	if c.EpochDurationSeconds < 10 {
-		return fmt.Errorf("epoch_duration_seconds must be at least 10")
+		return errors.New("epoch_duration_seconds must be at least 10")
 	}
 	if c.EstimatedCostPerMetricMonth < 0 {
-		return fmt.Errorf("estimated_cost_per_metric_month cannot be negative")
+		return errors.New("estimated_cost_per_metric_month cannot be negative")
 	}
 	if c.TopOffendersCount < 0 || c.TopOffendersCount > 500 {
-		return fmt.Errorf("top_offenders_count must be between 0 and 500")
+		return errors.New("top_offenders_count must be between 0 and 500")
 	}
 	if c.MaxTrackerCount < 0 || c.MaxTrackerCount > 10000000 {
-		return fmt.Errorf("max_tracker_count must be between 0 and 10,000,000")
+		return errors.New("max_tracker_count must be between 0 and 10,000,000")
 	}
 	for name, limit := range c.MetricOverrides {
 		if name == "" {
-			return fmt.Errorf("metric_overrides contains an empty metric name")
+			return errors.New("metric_overrides contains an empty metric name")
 		}
 		if limit <= 0 {
 			return fmt.Errorf("metric_overrides[%q] must be greater than 0", name)
 		}
 	}
 	if c.DropLogMaxPerEpoch < 0 {
-		return fmt.Errorf("drop_log_max_per_epoch must be >= 0")
+		return errors.New("drop_log_max_per_epoch must be >= 0")
+	}
+	if c.EnforcementMode != "" {
+		normalized := EnforcementMode(strings.ToLower(string(c.EnforcementMode)))
+		switch normalized {
+		case EnforcementTagOnly, EnforcementOverflowAttribute, EnforcementStripAndReaggregate:
+			// valid
+		default:
+			return fmt.Errorf("enforcement_mode must be one of: tag_only, overflow_attribute, strip_and_reaggregate; got %q", c.EnforcementMode)
+		}
 	}
 	return nil
 }

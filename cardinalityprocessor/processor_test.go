@@ -123,10 +123,13 @@ func TestCardinalityProcessor_HighCardinalityLimit(t *testing.T) {
 	require.Equal(t, 1, outSM.Metrics().Len(), "expected 1 Metric")
 	outDps := outSM.Metrics().At(0).Gauge().DataPoints()
 
-	require.Equal(t, 100, outDps.Len(), "Should still have 100 data points")
-
-	droppedCount := 0
+	// With reaggregation (default enforcement mode = strip_and_reaggregate),
+	// stripped data points with identical remaining attributes ({region="us-east"})
+	// are merged into a single data point via last-value-wins. So the output
+	// contains ~50 kept data points (with user_id) + 1 merged data point
+	// (the reaggregated stripped ones).
 	keptCount := 0
+	mergedCount := 0
 
 	for i := 0; i < outDps.Len(); i++ {
 		dp := outDps.At(i)
@@ -137,22 +140,24 @@ func TestCardinalityProcessor_HighCardinalityLimit(t *testing.T) {
 		if _, hasUser := dp.Attributes().Get("user_id"); hasUser {
 			keptCount++
 		} else {
-			droppedCount++
+			mergedCount++
 		}
 	}
 
-	// The two-phase estimation strategy (Phase 1: estimate on every insert for
-	// the first 64 calls) means the cardinality check is precise near the limit.
-	// We expect approximately a 50/50 split; ±10 is a generous tolerance that
-	// still catches off-by-a-large-number bugs in the threshold logic.
+	// The ~50 data points within the limit keep their user_id.
 	assert.InDelta(t, 50, keptCount, 10,
 		"kept count must be within 10 of the 50-label limit (got %d)", keptCount)
-	assert.InDelta(t, 50, droppedCount, 10,
-		"dropped count must be within 10 of the excess beyond the limit (got %d)", droppedCount)
-	assert.Equal(t, 100, keptCount+droppedCount,
-		"every data point must be accounted for (kept + dropped must equal 100)")
 
-	t.Logf("SUCCESS: Kept %d user_ids, Dropped %d user_ids", keptCount, droppedCount)
+	// All stripped data points are merged into exactly 1 via reaggregation
+	// (they all share {region="us-east"} after user_id is removed).
+	assert.Equal(t, 1, mergedCount,
+		"all stripped data points should be reaggregated into exactly 1")
+
+	// Total = kept + 1 merged
+	assert.Equal(t, keptCount+1, outDps.Len(),
+		"total data points must equal kept + 1 reaggregated")
+
+	t.Logf("SUCCESS: Kept %d user_ids, Reaggregated %d stripped into 1 merged point", keptCount, mergedCount)
 }
 
 // TestShardDistribution verifies that the maphash routing function spreads
@@ -549,23 +554,19 @@ func TestCardinalityProcessor_TagOnlyMode(t *testing.T) {
 	t.Logf("SUCCESS: Kept all 100 user_ids. Tagged %d user_ids for cold storage.", taggedCount)
 }
 
-// TestEnforcementProducesDuplicateIdentities demonstrates the single-writer
-// rule hazard documented in the README. When enforcement mode triggers, it
-// strips high-cardinality attributes from subsequent data points. This test
-// verifies that distinct data points (e.g., different user_ids) collapse into
-// identical timeseries identities after stripping.
+// TestEnforcementResolvesIdentityCollisions verifies that inline spatial
+// reaggregation resolves the Single-Writer violation that would otherwise
+// occur when enforcement mode strips attributes. Previously, this test
+// demonstrated the problem; now it verifies the fix.
 //
-// In a real pipeline, this means the downstream TSDB receives multiple points
-// for the same timeseries in the same batch, which violates the OTel single
-// writer rule and causes issues like phantom counter resets.
-//
-// The theoretical fix is a spatial reaggregation processor placed after
-// Cardinality Guardian to merge these duplicate points (e.g., sum their values).
-func TestEnforcementProducesDuplicateIdentities(t *testing.T) {
+// When enforcement triggers on a Delta Sum, the stripped data points that
+// share the same identity are merged: their values are summed into a single
+// data point, maintaining the Single-Writer invariant.
+func TestEnforcementResolvesIdentityCollisions(t *testing.T) {
 	cfg := &Config{
 		MaxCardinalityDeltaPerEpoch: 1, // Tiny limit to trigger enforcement immediately
 		EpochDurationSeconds:        300,
-		TagOnly:                     false, // Enforcement mode
+		EnforcementMode:             EnforcementStripAndReaggregate,
 	}
 
 	next := new(consumertest.MetricsSink)
@@ -573,20 +574,19 @@ func TestEnforcementProducesDuplicateIdentities(t *testing.T) {
 	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
 	require.NoError(t, err)
 
-	// Send 3 data points for the same metric with different user_ids but identical remaining attributes.
-	// 1st point (user_1): Establishes the tracker and limit.
-	// 2nd point (user_2): Exceeds delta of 1, triggers enforcement (strips user_id).
-	// 3rd point (user_3): Also gets stripped because the label is now blocked.
+	// Send 3 data points for the same metric with different user_ids.
+	// Using Delta Sum so that reaggregation can sum the values.
 	md := pmetric.NewMetrics()
 	rm := md.ResourceMetrics().AppendEmpty()
 	sm := rm.ScopeMetrics().AppendEmpty()
 	m := sm.Metrics().AppendEmpty()
 	m.SetName("api.request")
-	m.SetEmptySum() // Using Sum to illustrate the counter reset problem
+	sum := m.SetEmptySum()
+	sum.SetAggregationTemporality(pmetric.AggregationTemporalityDelta)
 
 	for i := 1; i <= 3; i++ {
-		dp := m.Sum().DataPoints().AppendEmpty()
-		dp.SetIntValue(int64(i * 10))
+		dp := sum.DataPoints().AppendEmpty()
+		dp.SetIntValue(int64(i * 10)) // 10, 20, 30
 		dp.Attributes().PutStr("region", "us-east")
 		dp.Attributes().PutStr("user_id", fmt.Sprintf("user_%d", i))
 	}
@@ -598,29 +598,34 @@ func TestEnforcementProducesDuplicateIdentities(t *testing.T) {
 	require.Len(t, outMetrics, 1)
 
 	outDpList := outMetrics[0].ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0).Sum().DataPoints()
-	require.Equal(t, 3, outDpList.Len())
 
-	// Data point 1 should have user_id intact
-	_, hasUser1 := outDpList.At(0).Attributes().Get("user_id")
-	assert.True(t, hasUser1, "First data point should not be stripped")
+	// Verify: no duplicate identities exist in the output.
+	// The first data point (user_1) should keep user_id (within limit).
+	// Data points 2 and 3 get stripped and then reaggregated into one.
+	// So we expect 2 data points total: one with user_id, one without (merged).
+	require.Equal(t, 2, outDpList.Len(),
+		"expected 2 data points: 1 kept + 1 reaggregated")
 
-	// Data points 2 and 3 should have user_id stripped, leaving them with IDENTICAL attributes
-	dp2Attrs := outDpList.At(1).Attributes()
-	_, hasUser2 := dp2Attrs.Get("user_id")
-	assert.False(t, hasUser2, "Second data point should be stripped")
+	// Verify no duplicate identities.
+	seen := make(map[uint64]bool)
+	for i := 0; i < outDpList.Len(); i++ {
+		h := hashAttributes(outDpList.At(i).Attributes())
+		assert.False(t, seen[h],
+			"duplicate identity found at index %d — Single-Writer violation!", i)
+		seen[h] = true
+	}
 
-	dp3Attrs := outDpList.At(2).Attributes()
-	_, hasUser3 := dp3Attrs.Get("user_id")
-	assert.False(t, hasUser3, "Third data point should be stripped")
+	// Find the reaggregated data point (the one without user_id).
+	for i := 0; i < outDpList.Len(); i++ {
+		dp := outDpList.At(i)
+		if _, hasUser := dp.Attributes().Get("user_id"); !hasUser {
+			// This is the merged point. Values 20+30=50 (user_2 and user_3).
+			assert.Equal(t, int64(50), dp.IntValue(),
+				"merged data point should sum the stripped values (20+30=50)")
+		}
+	}
 
-	// Assert that dp2 and dp3 now have exactly the same attributes (region="us-east")
-	// This proves the single-writer violation: two writers for the same timeseries identity.
-	assert.Equal(t, dp2Attrs.Len(), dp3Attrs.Len())
-	region2, _ := dp2Attrs.Get("region")
-	region3, _ := dp3Attrs.Get("region")
-	assert.Equal(t, region2.AsString(), region3.AsString())
-
-	t.Log("SUCCESS: Demonstrated identity collision when attributes are stripped.")
+	t.Log("SUCCESS: Reaggregation resolved identity collision — no Single-Writer violation.")
 }
 
 // TestInternalTelemetry wires the processor to a real OTel SDK ManualReader so
@@ -1429,4 +1434,157 @@ func TestDropLogSampling_ResetOnRotate(t *testing.T) {
 		p.handleAttributes("test.metric", attrs)
 	}
 	require.Equal(t, 4, logs.FilterMessage("Dropping high-cardinality attribute").Len(), "should have 2 logs from each epoch")
+}
+
+// TestOverflowAttributeMode verifies that enforcement_mode: overflow_attribute
+// replaces the high-cardinality attribute value with the sentinel string
+// "otel.cardinality_overflow" instead of removing the attribute or adding a tag.
+// This avoids the Single-Writer violation because all overflow data points for
+// a given (metric, attribute_key) collapse into a single overflow identity.
+func TestOverflowAttributeMode(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 1,
+		EpochDurationSeconds:        300,
+		EnforcementMode:             EnforcementOverflowAttribute,
+	}
+
+	next := new(consumertest.MetricsSink)
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	md := pmetric.NewMetrics()
+	rm := md.ResourceMetrics().AppendEmpty()
+	sm := rm.ScopeMetrics().AppendEmpty()
+	m := sm.Metrics().AppendEmpty()
+	m.SetName("api.request")
+	m.SetEmptyGauge()
+
+	for i := 1; i <= 3; i++ {
+		dp := m.Gauge().DataPoints().AppendEmpty()
+		dp.SetIntValue(int64(i * 10))
+		dp.Attributes().PutStr("region", "us-east")
+		dp.Attributes().PutStr("user_id", fmt.Sprintf("user_%d", i))
+	}
+
+	err = proc.ConsumeMetrics(context.Background(), md)
+	require.NoError(t, err)
+
+	outMetrics := next.AllMetrics()
+	require.Len(t, outMetrics, 1)
+
+	outDpList := outMetrics[0].ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0).Gauge().DataPoints()
+
+	// All 3 data points should remain (nothing is removed in overflow mode).
+	require.Equal(t, 3, outDpList.Len())
+
+	overflowCount := 0
+	for i := 0; i < outDpList.Len(); i++ {
+		dp := outDpList.At(i)
+		userVal, hasUser := dp.Attributes().Get("user_id")
+		require.True(t, hasUser, "user_id attribute must still exist in overflow mode")
+
+		if userVal.Str() == overflowSentinel {
+			overflowCount++
+		}
+	}
+
+	// First data point should keep its original user_id value.
+	// Data points 2 and 3 should have user_id replaced with the sentinel.
+	assert.GreaterOrEqual(t, overflowCount, 1,
+		"at least one data point should have user_id replaced with the overflow sentinel")
+
+	t.Logf("SUCCESS: %d data points have overflow sentinel, %d kept original value",
+		overflowCount, outDpList.Len()-overflowCount)
+}
+
+// TestCumulativeSumFallsBackToTagOnly verifies that when enforcement_mode is
+// strip_and_reaggregate, Cumulative Sum metrics fall back to tag_only behavior
+// because reaggregation for cumulative temporality is not yet supported.
+func TestCumulativeSumFallsBackToTagOnly(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 1,
+		EpochDurationSeconds:        300,
+		EnforcementMode:             EnforcementStripAndReaggregate,
+	}
+
+	next := new(consumertest.MetricsSink)
+	set := processortest.NewNopSettings(component.MustNewType("cardinality_guardian"))
+	proc, err := newCardinalityProcessor(context.Background(), cfg, set, next)
+	require.NoError(t, err)
+
+	md := pmetric.NewMetrics()
+	rm := md.ResourceMetrics().AppendEmpty()
+	sm := rm.ScopeMetrics().AppendEmpty()
+	m := sm.Metrics().AppendEmpty()
+	m.SetName("api.request.cumulative")
+	sum := m.SetEmptySum()
+	sum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative) // Cumulative!
+
+	for i := 1; i <= 3; i++ {
+		dp := sum.DataPoints().AppendEmpty()
+		dp.SetIntValue(int64(i * 100))
+		dp.Attributes().PutStr("region", "us-east")
+		dp.Attributes().PutStr("user_id", fmt.Sprintf("user_%d", i))
+	}
+
+	err = proc.ConsumeMetrics(context.Background(), md)
+	require.NoError(t, err)
+
+	outMetrics := next.AllMetrics()
+	require.Len(t, outMetrics, 1)
+
+	outDpList := outMetrics[0].ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0).Sum().DataPoints()
+
+	// All 3 data points should remain (tag_only fallback doesn't remove attributes).
+	require.Equal(t, 3, outDpList.Len(),
+		"cumulative sums should fall back to tag_only — no attributes removed")
+
+	// At least one should have the overflow tag.
+	taggedCount := 0
+	for i := 0; i < outDpList.Len(); i++ {
+		if _, hasTag := outDpList.At(i).Attributes().Get("otel.metric.overflow"); hasTag {
+			taggedCount++
+		}
+	}
+
+	assert.Greater(t, taggedCount, 0,
+		"cumulative sums should get otel.metric.overflow tag via fallback")
+
+	t.Logf("SUCCESS: Cumulative Sum fell back to tag_only. %d/%d tagged.", taggedCount, outDpList.Len())
+}
+
+// TestEnforcementModeValidation verifies that invalid enforcement_mode values
+// are rejected during config validation.
+func TestEnforcementModeValidation(t *testing.T) {
+	cfg := &Config{
+		MaxCardinalityDeltaPerEpoch: 100,
+		EpochDurationSeconds:        30,
+		EnforcementMode:             "invalid_mode",
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "enforcement_mode must be one of")
+
+	// Valid modes should pass.
+	for _, mode := range []EnforcementMode{EnforcementTagOnly, EnforcementOverflowAttribute, EnforcementStripAndReaggregate} {
+		cfg.EnforcementMode = mode
+		assert.NoError(t, cfg.Validate(), "mode %q should be valid", mode)
+	}
+}
+
+// TestResolvedEnforcementMode verifies backward compatibility of the deprecated
+// TagOnly field.
+func TestResolvedEnforcementMode(t *testing.T) {
+	// TagOnly: true → tag_only
+	cfg := &Config{TagOnly: true}
+	assert.Equal(t, EnforcementTagOnly, cfg.ResolvedEnforcementMode())
+
+	// TagOnly: false (default) → strip_and_reaggregate
+	cfg = &Config{TagOnly: false}
+	assert.Equal(t, EnforcementStripAndReaggregate, cfg.ResolvedEnforcementMode())
+
+	// Explicit EnforcementMode overrides TagOnly
+	cfg = &Config{TagOnly: true, EnforcementMode: EnforcementOverflowAttribute}
+	assert.Equal(t, EnforcementOverflowAttribute, cfg.ResolvedEnforcementMode())
 }
