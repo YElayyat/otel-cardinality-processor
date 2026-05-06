@@ -178,7 +178,7 @@ Removes the offending label and performs **inline spatial reaggregation** to mer
 ```mermaid
 flowchart TD
     A[Want to try Cardinality Guardian?] --> B{How do you run OTel Collector?}
-    B -- "Docker / K8s" --> C["docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.4.1"]
+    B -- "Docker / K8s" --> C["docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.5.0"]
     B -- "Kubernetes / Helm" --> M["Coming soon — Helm chart pending"]
     B -- "Custom binary (OCB)" --> D[Add to builder.yaml → ocb --config builder.yaml]
     B -- "otel-collector-contrib" --> E["Coming soon — donation pending"]
@@ -228,7 +228,7 @@ receivers:
 
 processors:
   - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.148.0
-  - gomod: github.com/YElayyat/otel-cardinality-processor v1.4.1
+  - gomod: github.com/YElayyat/otel-cardinality-processor v1.5.0
     name: cardinalityprocessor
     import: github.com/YElayyat/otel-cardinality-processor/cardinalityprocessor
 ```
@@ -256,7 +256,7 @@ processors:
       - region
       - http.status_code
       - service.name
-    tag_only: false                           # true = observe only, false = enforce
+    enforcement_mode: tag_only               # Start in observation mode (recommended)
     max_tracker_count: 0                     # Set > 0 to bound memory (0 = unlimited)
     top_offenders_count: 10                  # How many high-growth trackers to report via telemetry gauge
     estimated_cost_per_metric_month: 0.05    # For ROI tracking ($/series/month)
@@ -287,7 +287,7 @@ The official Docker image is automatically built and published to the GitHub Con
 To run the Cardinality Guardian, pull the latest official image:
 
 ```bash
-docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.4.1
+docker pull ghcr.io/yelayyat/otel-cardinality-processor:v1.5.0
 ```
 
 *(Optional: You can also build the secure, distroless-like multi-stage Dockerfile manually via `docker build -t ghcr.io/yelayyat/otel-cardinality-processor:latest .`)*
@@ -301,7 +301,7 @@ You must mount your configuration file. By default, the `ENTRYPOINT` expects thi
 docker run --rm \
   -v $(pwd)/examples/otel-collector-config.yaml:/etc/otelcol/config.yaml \
   -p 4317:4317 -p 4318:4318 -p 13133:13133 \
-  ghcr.io/yelayyat/otel-cardinality-processor:v1.4.1
+  ghcr.io/yelayyat/otel-cardinality-processor:v1.5.0
 ```
 
 2. **Verify Health**:
@@ -322,7 +322,7 @@ telemetrygen metrics --otlp-insecure --traces 0 --metrics 100 --metrics-per-requ
 For production environments, SREs should follow an "Observe then Enforce" strategy. This allows you to validate thresholds before physically dropping data.
 
 #### Step A: Create a production config
-Create `guardian-config.yaml` with `tag_only: true` to begin in observation mode. We'll set a tighter threshold of `100` new series per epoch for protection:
+Create `guardian-config.yaml` with `enforcement_mode: tag_only` to begin in observation mode. We'll set a tighter threshold of `100` new series per epoch for protection:
 
 ```yaml
 # guardian-config.yaml
@@ -331,7 +331,7 @@ processors:
     # Tighter threshold: drop/tag labels that grow by >100 unique values per epoch
     max_cardinality_delta_per_epoch: 100
     epoch_duration_seconds: 300
-    tag_only: true  # Start in observation mode (add tag, don't strip)
+    enforcement_mode: tag_only  # Start in observation mode (add tag, don't strip)
     never_drop_labels:
       - service.name
       - env
@@ -351,20 +351,20 @@ service:
 ```
 
 #### Step B: Deploy as a Background Service
-Run the container in detached mode (`-d`) and pin to a specific version (e.g., `v1.4.1`) instead of `latest` for stability:
+Run the container in detached mode (`-d`) and pin to a specific version (e.g., `v1.5.0`) instead of `latest` for stability:
 
 ```bash
 docker run -d \
   --name otel-guardian \
   -v $(pwd)/guardian-config.yaml:/etc/otelcol/config.yaml \
   -p 4317:4317 -p 4318:4318 -p 13133:13133 \
-  ghcr.io/yelayyat/otel-cardinality-processor:v1.4.1
+  ghcr.io/yelayyat/otel-cardinality-processor:v1.5.0
 ```
 
 #### Step C: Monitor and Switch
 1.  **Monitor**: Watch your dashboard for the `otel.metric.overflow` tag.
 2.  **Verify Health**: `curl http://localhost:13133/`
-3.  **Enforce**: Once you are confident in your thresholds, update the config to `tag_only: false` and restart the container to begin active enforcement.
+3.  **Enforce**: Once you are confident in your thresholds, update the config to `enforcement_mode: strip_and_reaggregate` and restart the container to begin active enforcement.
 
 ## Telemetry
 
