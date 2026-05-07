@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased / 1.5.0]
+## [1.5.1] - 2026-05-06
+
+### Fixed
+- **Config Validation**: Fixed a bug where a typo in `enforcement_mode` with correct casing (e.g. `strip_and_Reaggregate`) bypassed strict equality checks in the processor, causing it to silently run with no enforcement. `ResolvedEnforcementMode` now always returns lowercase.
+- **Security**: Hardened the order-independent XOR attribute hasher by hashing the key-value pair as a single concatenated string, eliminating theoretical XOR cancellation vulnerabilities.
+
+## [1.5.0] - 2026-05-06
 
 ### Added
 - **Inline Spatial Reaggregation**: Implemented zero-allocation in-place merging for identical metric identities to resolve the Single-Writer invariant violation caused by stripped attributes.
