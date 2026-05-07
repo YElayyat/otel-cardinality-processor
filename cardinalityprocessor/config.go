@@ -169,7 +169,7 @@ const overflowSentinel = "otel.cardinality_overflow"
 // the deprecated TagOnly field if EnforcementMode is not explicitly set.
 func (c *Config) ResolvedEnforcementMode() EnforcementMode {
 	if c.EnforcementMode != "" {
-		return c.EnforcementMode
+		return EnforcementMode(strings.ToLower(string(c.EnforcementMode)))
 	}
 	// Backward compatibility: map the deprecated TagOnly bool.
 	if c.TagOnly {

@@ -126,13 +126,10 @@ func hashAttributes(attrs pcommon.Map) uint64 {
 	}
 	var combined uint64
 	attrs.Range(func(k string, v pcommon.Value) bool {
-		// Hash key and value together, then XOR to make order-independent.
-		kh := xxhash.Sum64String(k)
-		vh := xxhash.Sum64String(v.AsString())
-		// Combine key and value hashes in a way that avoids collisions
-		// between different key-value pairs. Rotate the key hash to break
-		// symmetry (so k="a",v="b" differs from k="b",v="a").
-		combined ^= (kh<<32 | kh>>32) ^ vh
+		// Hash key and value together as a single unit, then XOR.
+		// Using a null byte separator ensures "a"+"b" != "ab"+""
+		pairHash := xxhash.Sum64String(k + "\x00" + v.AsString())
+		combined ^= pairHash
 		return true
 	})
 	return combined
