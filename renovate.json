@@ -1,0 +1,103 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits"
+  ],
+  "timezone": "Etc/UTC",
+  "schedule": [
+    "before 09:00 on monday"
+  ],
+  "labels": [
+    "dependencies"
+  ],
+  "prConcurrentLimit": 5,
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "packageRules": [
+    {
+      "description": "The donated component. Its own PR, never grouped and never batched behind anything else - this is the dependency the repository exists to track, and burying it in a group is how it goes stale unnoticed. Contrib components are tagged individually and do not share a release number with the collector core.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "github.com/open-telemetry/opentelemetry-collector-contrib/processor/cardinalityguardianprocessor"
+      ],
+      "schedule": [
+        "at any time"
+      ],
+      "prPriority": 10,
+      "labels": [
+        "dependencies",
+        "upstream-component"
+      ]
+    },
+    {
+      "description": "Collector core modules move in lockstep across two version streams - stable v1.x (component, pdata, processor, confmap, consumer, pipeline) and unstable v0.x (the *test helpers, featuregate, xprocessor). Bumping any subset produces combinations that do not compile, so they go in one PR or not at all.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "go.opentelemetry.io/collector{/,}**"
+      ],
+      "groupName": "opentelemetry-collector core"
+    },
+    {
+      "description": "OTel Go SDK and API modules, likewise released together.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "go.opentelemetry.io/otel{/,}**",
+        "go.opentelemetry.io/auto{/,}**"
+      ],
+      "groupName": "opentelemetry-go sdk"
+    },
+    {
+      "description": "Everything else in go.mod, batched. Low-signal churn (testify, zap, uuid, xxhash) should not compete for attention with the two groups above.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "!go.opentelemetry.io/**",
+        "!github.com/open-telemetry/**"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "go dependencies"
+    },
+    {
+      "description": "Do not let the bot move the go directive or the toolchain line. Those are deliberate choices - a bump can change language semantics - so raise them by hand.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchDepTypes": [
+        "golang"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "GitHub Actions in .github/workflows, batched monthly. Pin churn here is noise relative to the Go dependencies.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "github actions",
+      "schedule": [
+        "before 09:00 on the first day of the month"
+      ]
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "labels": [
+      "dependencies",
+      "security"
+    ],
+    "schedule": [
+      "at any time"
+    ]
+  },
+  "osvVulnerabilityAlerts": true
+}
